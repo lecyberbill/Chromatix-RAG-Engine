@@ -5,7 +5,7 @@ import sys
 import time
 
 def ingest_folder(folder_path):
-    api_url = "http://localhost:8080/upload"
+    api_url = "http://localhost:8000/ingest"
     supported_extensions = ['.pdf', '.docx', '.pptx']
     
     if not os.path.exists(folder_path):

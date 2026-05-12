@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 data/db/
 data/pdfs/
+data/brain_vault/
+temp_docs/
 *.log
 .env
 access_test.txt

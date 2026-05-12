@@ -1,305 +1,138 @@
-/* [WFGY] Zone: SAFE | λ: 0.9 | Action: High-Fidelity DOCX Rendering */
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Send, Upload, FileText, Zap, Loader2, Maximize2, 
-  Plus, History, MessageSquare, X, ChevronLeft, Trash2 
-} from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import { Shield, LayoutGrid } from 'lucide-react';
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { MessageSquare, Upload, Cpu, Activity, Info, X, FileText, ChevronLeft, ChevronRight } from 'lucide-react';
+import Chat from './components/Chat';
+import Ingest from './components/Ingest';
 
-const API_BASE = `http://${window.location.hostname}:8080`;
+const App = () => {
+  const [activeTab, setActiveTab] = useState('chat');
+  const [status, setStatus] = useState('online');
+  const [selectedPdf, setSelectedPdf] = useState(null); // { url: string, page: number, name: string }
+  const [isExpanded, setIsExpanded] = useState(false);
 
-export default function App() {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [isUploading, setIsUploading] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [currentPdf, setCurrentPdf] = useState(null);
-  const [mdContent, setMdContent] = useState("");
-  const [previewMode, setPreviewMode] = useState("pdf"); // 'pdf', 'md', 'docx'
-  const [showPreview, setShowPreview] = useState(false);
-  const [sessions, setSessions] = useState([]);
-  const [currentSessionId, setCurrentSessionId] = useState(Date.now().toString());
-  
-  const chatEndRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const docxRef = useRef(null);
-
-  useEffect(() => {
-    fetchSessions();
-  }, []);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    if (messages.length > 0) saveSession();
-  }, [messages]);
-
-  const fetchSessions = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/sessions`);
-      const data = await res.json();
-      setSessions(data);
-    } catch (e) { console.error("Erreur sessions", e); }
-  };
-
-  const saveSession = async () => {
-    const title = messages[0]?.text.substring(0, 30) || "Discussion";
-    try {
-      await fetch(`${API_BASE}/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: currentSessionId, title, messages })
-      });
-      fetchSessions();
-    } catch (e) { console.error("Erreur sauvegarde", e); }
-  };
-
-  const loadSession = async (id) => {
-    try {
-      const res = await fetch(`${API_BASE}/sessions/${id}`);
-      const data = await res.json();
-      setMessages(data.messages);
-      setCurrentSessionId(data.id);
-      setShowPreview(false);
-    } catch (e) { console.error("Erreur chargement", e); }
-  };
-
-  const deleteSession = async (e, id) => {
-    e.stopPropagation();
-    if (!window.confirm("Supprimer ?")) return;
-    try {
-      await fetch(`${API_BASE}/sessions/${id}`, { method: 'DELETE' });
-      if (currentSessionId === id) startNewChat();
-      fetchSessions();
-    } catch (e) { console.error("Erreur suppression", e); }
-  };
-
-  const startNewChat = () => {
-    setMessages([]);
-    setCurrentSessionId(Date.now().toString());
-    setShowPreview(false);
-  };
-
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setIsUploading(true);
-    const formData = new FormData();
-    formData.append("file", file);
-    try {
-      const response = await fetch(`${API_BASE}/upload`, { method: "POST", body: formData });
-      const data = await response.json();
-      setMessages(prev => [...prev, { type: 'ai', text: `✅ **Analysé :** ${file.name} (${data.chunks} segments).` }]);
-    } catch (error) { setMessages(prev => [...prev, { type: 'ai', text: "❌ Erreur upload." }]); } 
-    finally { setIsUploading(false); }
-  };
-
-  const handleSend = async () => {
-    if (!input.trim() || isProcessing) return;
-    const userMsg = input.trim();
-    setInput("");
-    setMessages(prev => [...prev, { type: 'user', text: userMsg }]);
-    setIsProcessing(true);
-    try {
-      const response = await fetch(`${API_BASE}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q: userMsg, history: messages.map(m => ({ type: m.type, text: m.text })) }),
-      });
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let aiText = "";
-      setMessages(prev => [...prev, { type: 'ai', text: "", sources: [] }]);
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        if (chunk.startsWith("SOURCES_JSON:")) {
-          const sources = JSON.parse(chunk.split("\n")[0].replace("SOURCES_JSON:", ""));
-          setMessages(prev => {
-            const last = [...prev];
-            last[last.length - 1].sources = sources;
-            return last;
-          });
-        } else if (chunk.startsWith("CPS_MATRIX:")) {
-          const matrixHex = chunk.split("\n")[0].replace("CPS_MATRIX:", "");
-          setMessages(prev => {
-            const last = [...prev];
-            last[last.length - 1].cpsMatrix = matrixHex;
-            return last;
-          });
-        } else {
-          aiText += chunk;
-          setMessages(prev => {
-            const last = [...prev];
-            last[last.length - 1].text = aiText;
-            return last;
-          });
-        }
-      }
-    } catch (error) { setMessages(prev => [...prev, { type: 'ai', text: "❌ Erreur serveur." }]); } 
-    finally { setIsProcessing(false); }
-  };
-
-  const openSource = async (url, page, file) => {
-    setShowPreview(true);
-    const isPdf = file.toLowerCase().endsWith(".pdf");
-    const isDocx = file.toLowerCase().endsWith(".docx");
-
-    if (isPdf) {
-      setPreviewMode("pdf");
-      setCurrentPdf(`${API_BASE}${url}#page=${page}`);
-    } else if (isDocx && window.docx) {
-      setPreviewMode("docx");
-      try {
-        const response = await fetch(`${API_BASE}${url}`);
-        const arrayBuffer = await response.arrayBuffer();
-        setTimeout(() => {
-          if (docxRef.current) {
-            docxRef.current.innerHTML = "";
-            window.docx.renderAsync(arrayBuffer, docxRef.current)
-              .then(() => console.log("Docx rendered"))
-              .catch(e => {
-                console.error("Docx render fail", e);
-                setPreviewMode("md");
-              });
-          }
-        }, 100);
-      } catch (e) { setPreviewMode("md"); }
-    } else {
-      setPreviewMode("md");
-      try {
-        const res = await fetch(`${API_BASE}${url}.md`);
-        const text = await res.text();
-        setMdContent(text);
-      } catch (e) { setMdContent("Aperçu Markdown non disponible."); }
-    }
-  };
+  const tabs = [
+    { id: 'chat', label: 'Chat Neural', icon: <MessageSquare size={20} /> },
+    { id: 'ingest', label: 'Ingestion PDF', icon: <Upload size={20} /> },
+  ];
 
   return (
-    <div className={`app-container ${showPreview ? 'with-pdf' : ''}`}>
-      <aside className="history-sidebar">
-        <div className="p-4 flex items-center gap-2 border-bottom">
-          <Zap className="text-[var(--neon-blue)] w-6 h-6" />
-          <span className="font-bold text-lg">NemoChain</span>
-        </div>
-        <button onClick={startNewChat} className="new-chat-btn"><Plus size={18} /> Nouvelle discussion</button>
-        <div className="flex-1 overflow-y-auto py-2">
-          {sessions.map(s => (
-            <div key={s.id} onClick={() => loadSession(s.id)} className={`history-item group ${currentSessionId === s.id ? 'active' : ''}`}>
-              <MessageSquare size={14} className="shrink-0" />
-              <span className="flex-1 truncate">{s.title}</span>
-              <button onClick={(e) => deleteSession(e, s.id)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500"><Trash2 size={14} /></button>
-            </div>
-          ))}
-        </div>
-        <div className="p-4 text-[0.7rem] text-slate-500 border-top">v2.4 | High-Fidelity Rendering</div>
-      </aside>
-
-      <main className="main-chat-area">
-        <header className="sidebar-header">
-          <div className="flex items-center gap-3"><span className="text-sm font-medium text-slate-400">Scientific Workspace</span></div>
-          <button onClick={() => fileInputRef.current?.click()} className="source-badge">
-            <Upload className="w-4 h-4" /> Importer
-          </button>
-          <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-        </header>
-
-        <div className="chat-messages">
-          {messages.map((msg, idx) => (
-            <div key={idx} className={`chat-bubble ${msg.type === 'user' ? 'user-bubble' : 'ai-bubble'}`}>
-              {msg.cpsMatrix && (
-                <div className="cps-badge">
-                  <Shield size={12} /> SECURE CPS STREAM ACTIVE
-                  <CpsVisualizer hex={msg.cpsMatrix} />
-                </div>
-              )}
-              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.text}</ReactMarkdown>
-              {msg.sources && msg.sources.length > 0 && (
-                <div className="sources-container">
-                  {msg.sources.map((s, si) => (
-                    <button key={si} onClick={() => openSource(s.url, s.page, s.file)} className="source-badge">
-                      <FileText size={12} /> {s.file} {s.file.endsWith('.pdf') ? `(p.${s.page})` : '(DOC)'}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-          <div ref={chatEndRef} />
-        </div>
-
-        <div className="input-container">
-          <div className="glass-input-wrapper">
-            <input className="main-input" placeholder="Question scientifique..." value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSend()} />
-            <button className="send-button" onClick={handleSend}><Send size={20} /></button>
+    <div className="min-h-screen flex flex-col bg-[#050507] overflow-hidden text-slate-200">
+      {/* Navigation Bar */}
+      <nav className="glass-nav px-8 py-4 flex items-center justify-between z-50">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-primary/20 rounded-xl shadow-[0_0_20px_rgba(59,130,246,0.2)] border border-primary/30">
+            <Cpu className="text-primary" size={24} />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold tracking-tight">
+              Chromatix <span className="text-primary font-black">RAG</span>
+            </h1>
+            <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">Neural Workstation</p>
           </div>
         </div>
-      </main>
 
-      {showPreview && (
-        <aside className="sidebar-preview">
-          <header className="sidebar-header">
-            <span className="font-bold flex items-center gap-2"><FileText size={18} className="text-[var(--neon-blue)]" /> {previewMode.toUpperCase()} Preview</span>
-            <button onClick={() => setShowPreview(false)}><X size={20} /></button>
-          </header>
-          <div className="pdf-viewer-container p-4 overflow-y-auto bg-white">
-            {previewMode === 'pdf' ? (
-              <iframe src={currentPdf} className="pdf-iframe" title="PDF Preview" />
-            ) : previewMode === 'docx' ? (
-              <div ref={docxRef} className="docx-render-container" style={{ color: 'black' }}>
-                <div className="flex items-center justify-center h-full text-slate-400">
-                  <Loader2 className="animate-spin" /> Chargement du document...
+        <div className="flex gap-8 relative">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 font-medium transition-all duration-300 relative py-1 ${
+                activeTab === tab.id ? 'text-primary scale-105' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+              {activeTab === tab.id && (
+                <motion.div
+                  layoutId="activeTab"
+                  className="absolute -bottom-4 left-0 right-0 h-[2px] bg-primary shadow-[0_0_15px_var(--primary)]"
+                />
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 px-3 py-1.5 glass-card rounded-full text-xs">
+            <Activity size={14} className={status === 'online' ? 'text-cyan-400' : 'text-red-400'} />
+            <span className="font-semibold">{status === 'online' ? 'Engine Ready' : 'Engine Offline'}</span>
+          </div>
+        </div>
+      </nav>
+
+      {/* Main Content Area with Optional Sidebar */}
+      <div className="flex-1 flex overflow-hidden">
+        <main className={`flex-1 transition-all duration-500 ease-in-out px-4 py-8 overflow-y-auto ${selectedPdf ? (isExpanded ? 'max-w-[25%]' : 'max-w-[55%]') : 'max-w-6xl mx-auto'}`}>
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.4, ease: "circOut" }}
+              className="h-full"
+            >
+              {activeTab === 'chat' ? <Chat onSelectPdf={(pdf) => setSelectedPdf({
+                name: pdf.name,
+                url: `http://localhost:8000/pdfs/${pdf.name}`,
+                page: pdf.page || 1
+              })} /> : <Ingest />}
+            </motion.div>
+          </AnimatePresence>
+        </main>
+
+        {/* PDF Sidebar (Drawer) with Expand Capability */}
+        <AnimatePresence>
+          {selectedPdf && (
+            <motion.aside
+              initial={{ x: '100%' }}
+              animate={{ x: 0, width: isExpanded ? '75%' : '45%' }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+              className="h-full bg-[#0a0a0f]/80 backdrop-blur-2xl border-l border-white/5 flex flex-col relative shadow-[-20px_0_50px_rgba(0,0,0,0.5)] z-40"
+            >
+              <div className="p-4 border-b border-white/10 flex items-center justify-between bg-white/5">
+                <div className="flex items-center gap-3">
+                  <div className="p-1.5 bg-primary/10 rounded-lg">
+                    <FileText className="text-primary" size={18} />
+                  </div>
+                  <span className="text-sm font-bold truncate max-w-[300px]">{selectedPdf.name}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => setIsExpanded(!isExpanded)}
+                    className="p-2 hover:bg-white/10 rounded-lg transition-colors text-slate-400 hover:text-primary"
+                    title={isExpanded ? "Réduire" : "Agrandir"}
+                  >
+                    {isExpanded ? <ChevronRight size={20} /> : <ChevronLeft size={20} />}
+                  </button>
+                  <button 
+                    onClick={() => setSelectedPdf(null)}
+                    className="p-2 hover:bg-red-500/20 rounded-lg transition-colors text-slate-400 hover:text-red-400"
+                  >
+                    <X size={20} />
+                  </button>
                 </div>
               </div>
-            ) : (
-              <div className="prose prose-slate max-w-none p-4 bg-slate-900 text-white rounded-lg">
-                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{mdContent}</ReactMarkdown>
+              
+              <div className="flex-1 bg-black/60 relative flex flex-col">
+                <iframe
+                  src={`${selectedPdf.url}#page=${selectedPdf.page}`}
+                  className="w-full h-full flex-1 border-none"
+                  title="PDF Viewer"
+                  style={{ minHeight: 'calc(100vh - 80px)' }}
+                />
               </div>
-            )}
-          </div>
-        </aside>
-      )}
+            </motion.aside>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Background Orbs */}
+      <div className="fixed top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary opacity-[0.03] blur-[120px] rounded-full -z-10" />
+      <div className="fixed bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary opacity-[0.03] blur-[120px] rounded-full -z-10" />
     </div>
   );
-}
+};
 
-function CpsVisualizer({ hex }) {
-  const canvasRef = useRef(null);
-
-  useEffect(() => {
-    if (!hex || !canvasRef.current) return;
-    
-    // Extraction des pixels (simplifié pour le POC: on prend le début du flux)
-    // Le format du flux hex ici contient le PNG complet
-    // Mais pour le visualiseur "live", on va juste dessiner les premiers octets
-    // pour donner l'effet de matrice.
-    const ctx = canvasRef.current.getContext('2d');
-    const bytes = new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
-    
-    // On dessine une matrice 32x32 à partir du flux
-    const imageData = ctx.createImageData(32, 32);
-    for (let i = 0; i < imageData.data.length; i += 4) {
-      const byteIdx = (i / 4) * 3;
-      if (byteIdx + 2 < bytes.length) {
-        imageData.data[i] = bytes[byteIdx];     // R
-        imageData.data[i+1] = bytes[byteIdx+1]; // G
-        imageData.data[i+2] = bytes[byteIdx+2]; // B
-        imageData.data[i+3] = 255;             // A
-      }
-    }
-    ctx.putImageData(imageData, 0, 0);
-  }, [hex]);
-
-  return (
-    <canvas 
-      ref={canvasRef} 
-      width={32} 
-      height={32} 
-      className="cps-visualizer"
-      title="Chromatix Latent Matrix (Click to inspect)"
-    />
-  );
-}
+export default App;

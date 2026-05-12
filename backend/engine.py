@@ -1,62 +1,100 @@
-# [WFGY] Zone: SAFE | λ: 0.2 | Action: Fix Syntax & Multi-format Logic
 import os
 import torch
+from PIL import Image
 import json
 import gc
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_ollama import ChatOllama
-from langchain_community.vectorstores.utils import filter_complex_metadata
-from pypdf import PdfReader, PdfWriter
-import io
-import tempfile
 import sys
-import gc
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import uuid
+import io
+import time
 
+# Chromatix CPS
+from chromatix_cps.core import CPSPacket
+
+# PDF Processing
+from pypdf import PdfReader, PdfWriter
+
+# [CRITICAL] Docling pour l'ingestion unifiee
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from langchain_chroma import Chroma
+
+print("--- [DEBUG] Import Chromatix... ---")
 # Add chromatix to path
 sys.path.append(r"d:\image_to_text\chromatix")
 from chromatix_cps.core import CPSPacket
 from chromatix_cps.integrations import TransformersHook
 
 class RAGEngine:
-    def __init__(self):
+    def __init__(self, model_id="google/gemma-4-E2B-it"):
+        # 1. Configuration
+        self.model_id = model_id
         self.db_path = "data/db"
         self.pdf_path = "data/pdfs"
-        self.model_id = "mistralai/Mistral-Nemo-Instruct-v1"
         
-        # 1. Embedding Model
+        # 1. Embedding Model (Custom Lightweight to avoid sentence-transformers crash)
         model_name = "BAAI/bge-small-en-v1.5"
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=model_name,
-            model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'},
-            encode_kwargs={'normalize_embeddings': True}
-        )
+        print(f"--- [EMBEDDINGS] Initialisation Custom (Pure Transformers)... ---")
+        try:
+            from transformers import AutoModel, AutoTokenizer
+            class CustomEmbeddings:
+                def __init__(self, model_id):
+                    print(f"--- [EMBEDDINGS] Chargement sur GPU... ---")
+                    self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+                    self.model = AutoModel.from_pretrained(model_id).to("cuda").half() # PASSAGE SUR GPU + HALF
+                    self.model.eval()
+                def embed_documents(self, texts):
+                    inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to("cuda")
+                    with torch.no_grad():
+                        outputs = self.model(**inputs)
+                    # Utilisation de la moyenne des tokens (mean pooling) pour plus de precision
+                    return outputs.last_hidden_state.mean(dim=1).detach().cpu().numpy().tolist()
+                def embed_query(self, text):
+                    return self.embed_documents([text])[0]
+            
+            self.embeddings = CustomEmbeddings(model_name)
+            print("--- [EMBEDDINGS] OK (GPU Accelere) ! ---")
+        except Exception as e:
+            print(f"!!! [EMBEDDINGS] Erreur fatale : {e}")
+            raise e
         
-        # 2. Local LLM (Chromatix-Native)
-        print(f"--- [LLM] Chargement de {self.model_id} en 4-bit... ---")
+        # 2. Local LLM (Chromatix-Native) - Mode Ultra-Light 4-bit + SDPA
+        print(f"--- [LLM] Chargement de {self.model_id} (Mode Eco-VRAM)... ---")
+        from transformers import AutoProcessor
+        
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
+            bnb_4bit_use_double_quant=True
         )
         
+        import time
+        start_time = time.time()
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
             quantization_config=bnb_config,
-            device_map="auto",
-            trust_remote_code=True
+            device_map={"": 0},
+            trust_remote_code=True,
+            attn_implementation="sdpa"
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        self.processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
+        print(f"--- [LLM] Modele et Processor charges en {time.time() - start_time:.2f}s ---")
+        self.tokenizer = self.processor.tokenizer
+        print("--- [LLM] Tokenizer et Template prets ! ---")
         
-        # 3. Chromatix Hook
-        self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM")
+        # 3. Chromatix Hook & CPS
+        print("--- [CPS] Initialisation du protocole Pixel Standard (No-Thinking Mode)... ---")
+        self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=self.processor)
+        self.cps = CPSPacket(master_key="CHROMATIX-NEURAL-RAG-2026")
         
         # 4. Vector DB
         self.vector_db = None
         self.cps = CPSPacket(master_key="RAG-SECURE-STREAM", recovery_key="RAG-RECOVERY-TETHER")
+        print("--- [DB] Initialisation de la base vectorielle... ---")
         self._init_db()
 
     def _init_db(self):
@@ -65,216 +103,318 @@ class RAGEngine:
         else:
             os.makedirs(self.db_path, exist_ok=True)
 
-    def process_file(self, file_path):
-        from langchain_docling.loader import DoclingLoader, ExportType
-        from docling.document_converter import DocumentConverter, PdfFormatOption
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.datamodel.accelerator_options import AcceleratorOptions
-        from docling.datamodel.base_models import InputFormat
-
-        print(f"--- [DEBUT] Ingestion de : {file_path} ---")
+    def ingest_high_fidelity(self, file_path, progress_callback=None):
+        """
+        High-fidelity ingestion using Docling (Sequential Page-by-Page).
+        """
+        print(f"--- [INGEST] Strategie Sequentielle Granite + Brain Vault : {os.path.basename(file_path)} ---")
+        vault_path = "data/brain_vault"
+        os.makedirs(vault_path, exist_ok=True)
         
-        pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = False 
-        pipeline_options.do_table_structure = False
-        pipeline_options.images_scale = 0.05
-        pipeline_options.generate_page_images = False
-        pipeline_options.accelerator_options = AcceleratorOptions(device="cpu", num_threads=1)
-        
-        converter = DocumentConverter(
-            allowed_formats=[InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX],
-            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-        )
-
-        ext = os.path.splitext(file_path)[1].lower()
-        all_final_chunks = []
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=200)
-
-        # CAS 1 : PDF -> Ingestion Chirurgicale Page par Page
-        if ext == ".pdf":
+        try:
+            from pypdf import PdfReader, PdfWriter
+            import io
+            import gc
+            import time
             reader = PdfReader(file_path)
             total_pages = len(reader.pages)
-            for i in range(total_pages):
-                current_page_num = i + 1
-                print(f"Traitement Page {current_page_num}/{total_pages}...")
+            
+            all_texts = []
+            all_metadatas = []
+            
+            # Initialisation Standard Ultra-Rapide (Zéro-OCR pour PDF Natifs)
+            from docling.document_converter import DocumentConverter, PdfFormatOption
+            from docling.datamodel.base_models import InputFormat, DocumentStream
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            
+            pipeline_options = PdfPipelineOptions()
+            pipeline_options.do_ocr = False
+            pipeline_options.do_table_structure = True
+            
+            print("--- [RAG] Initialisation Moteur Nitro (Standard Fast)... ---")
+            converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+                }
+            )
+            print("--- [RAG] Moteur Nitro PRET ! ---")
+            from queue import Queue
+            from threading import Thread
+            
+            # Queue de pages extraites (Buffer pour fluidifier le pipeline)
+            extraction_queue = Queue(maxsize=10)
+            
+            def extraction_worker():
+                """Thread producteur : Extrait le texte via Docling en avance sur le GPU."""
                 try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                        tmp_path = tmp_file.name
+                    for p_num in range(1, total_pages + 1):
+                        p_idx = p_num - 1
+                        page = reader.pages[p_idx]
+                        
+                        # Isoler la page dans un buffer
                         writer = PdfWriter()
-                        writer.add_page(reader.pages[i])
-                        writer.write(tmp_path)
+                        writer.add_page(page)
+                        page_stream = io.BytesIO()
+                        writer.write(page_stream)
+                        page_stream.seek(0)
+                        
+                        # Docling Extraction
+                        if progress_callback: progress_callback(p_num, total_pages, "extraction")
+                        doc_stream = DocumentStream(name=f"p{p_num}.pdf", stream=page_stream)
+                        result = converter.convert(doc_stream)
+                        doc = result.document
+                        
+                        # Extraction hybride (Math/Texte)
+                        seen_content = set()
+                        page_blocks = []
+                        for item, level in doc.iterate_items():
+                            label = getattr(item, "label", "").lower()
+                            if any(x in label for x in ["table", "formula", "equation"]):
+                                txt = doc.export_to_markdown([item]).strip()
+                            else:
+                                txt = getattr(item, "text", "").strip()
+                            if txt and txt not in seen_content:
+                                page_blocks.append(txt)
+                                seen_content.add(txt)
+                        
+                        page_text = "\n\n".join(page_blocks)
+                        if len(page_text) > 20000: page_text = page_text[:20000]
+                        
+                        extraction_queue.put((p_num, page_text))
                     
-                    try:
-                        loader = DoclingLoader(file_path=tmp_path, export_type=ExportType.DOC_CHUNKS, converter=converter)
-                        page_docs = loader.load()
-                        for doc in page_docs:
-                            doc.metadata['page'] = current_page_num
-                            doc.metadata['source_name'] = os.path.basename(file_path)
-                            doc.metadata['file_url'] = f"/files/{os.path.basename(file_path)}"
-                        all_final_chunks.extend(splitter.split_documents(page_docs))
-                    finally:
-                        if os.path.exists(tmp_path): os.remove(tmp_path)
+                    # Signal de fin
+                    extraction_queue.put(None)
                 except Exception as e:
-                    print(f"!!! Erreur Page {current_page_num}: {e}")
+                    print(f"!!! [PIPELINE_ERROR] Producer: {e}")
+                    extraction_queue.put(None)
+
+            # Lancement du producteur
+            print("   [NITRO] Lancement du pipeline CPU/GPU...")
+            producer_thread = Thread(target=extraction_worker, daemon=True)
+            producer_thread.start()
+
+            # Boucle principale (Consommateur GPU)
+            processed_count = 0
+            while True:
+                item = extraction_queue.get()
+                if item is None: break
                 
-                if current_page_num % 5 == 0: gc.collect()
+                current_page_num, page_text = item
+                if not page_text.strip():
+                    print(f"--- [RAG] Page {current_page_num}/{total_pages} (Vide) ---")
+                    if progress_callback: progress_callback(current_page_num, total_pages)
+                    continue
+                
+                print(f"--- [RAG] Page {current_page_num}/{total_pages} (Neural Scan) ---")
+                
+                # Capture Neurale Gemma 4 (GPU)
+                if progress_callback: progress_callback(current_page_num, total_pages, "embedding")
+                start_cap = time.time()
+                stream = self.hook.extract_brain_state(page_text, epoch_id=2026)
+                cap_duration = time.time() - start_cap
+                
+                # Stockage Direct NATIVE (Chromatix Binary Compressed)
+                if progress_callback: progress_callback(current_page_num, total_pages, "storage")
+                img_id = f"{uuid.uuid4()}.cts"
+                img_path = os.path.join(vault_path, img_id)
+                with open(img_path, "wb") as f:
+                    f.write(stream.getvalue())
+                
+                all_texts.append(page_text)
+                all_metadatas.append({
+                    "source": file_path, 
+                    "page": current_page_num,
+                    "brain_state_img": img_path,
+                    "index": f"{processed_count}"
+                })
+                processed_count += 1
+                
+                # NETTOYAGE AGRESSIF
+                torch.cuda.empty_cache()
+                gc.collect()
+                
+                if progress_callback:
+                    progress_callback(current_page_num, total_pages, "idle")
+                
+                mem_used = torch.cuda.memory_allocated() / 1024**2
+                print(f"   [OK] Capture terminee en {cap_duration:.2f}s | VRAM: {mem_used:.2f} MB")
+
+
+            # Finalisation ChromaDB
+            if all_texts:
+                if not self.vector_db:
+                    self.vector_db = Chroma.from_texts(texts=all_texts, embedding=self.embeddings, persist_directory=self.db_path, metadatas=all_metadatas)
+                else:
+                    self.vector_db.add_texts(texts=all_texts, metadatas=all_metadatas)
+                print(f"--- [INGEST] Termine : {len(all_texts)} pages indexees ! ---")
+                return len(all_texts)
+                
+        except Exception as e:
+            print(f"!!! [INGEST] Erreur globale : {e}")
+            import traceback
+            traceback.print_exc()
+            return 0
+        return 0
         
-        # CAS 2 : DOCX / PPTX -> Ingestion Standard
-        else:
+        return 0
+
+    def process_file(self, file_path):
+        """
+        Simplified ingestion using PyPDF for quick tests.
+        For high-fidelity scientific ingestion, use 'ingest_docling.py'.
+        """
+        print(f"--- [INGEST] Ingestion Rapide (PyPDF) : {os.path.basename(file_path)} ---")
+        try:
+            reader = PdfReader(file_path)
+            content = ""
+            for page in reader.pages:
+                content += page.extract_text() + "\n\n"
+        except Exception as e:
+            print(f"!!! [INGEST] Erreur : {e}")
+            return 0
+
+        segments = [s.strip() for s in content.split("\n\n") if len(s.strip()) > 150]
+        texts = []
+        metadatas = []
+        
+        print(f"--- [CPS] Capture neuronale de {len(segments)} segments... ---")
+        for i, seg in enumerate(segments[:10]):
             try:
-                print(f"Traitement format natif {ext}...")
-                loader = DoclingLoader(file_path=file_path, export_type=ExportType.DOC_CHUNKS, converter=converter)
-                docs = loader.load()
-                for doc in docs:
-                    doc.metadata['page'] = 1
-                    doc.metadata['source_name'] = os.path.basename(file_path)
-                    doc.metadata['file_url'] = f"/files/{os.path.basename(file_path)}"
-                all_final_chunks.extend(splitter.split_documents(docs))
+                stream = self.hook.extract_brain_state(seg, epoch_id=2026)
+                brain_state_hex = stream.getvalue().hex()
+                texts.append(seg)
+                metadatas.append({"source": file_path, "brain_state": brain_state_hex, "index": i})
             except Exception as e:
-                print(f"!!! Erreur Ingestion {ext}: {e}")
+                continue
 
-        # Sauvegarde d'une version Markdown pour l'aperçu (DOCX/PPTX UNIQUEMENT)
-        if ext != ".pdf":
-            try:
-                print(f"Génération de l'aperçu Markdown pour {ext}...")
-                res = converter.convert(file_path)
-                md_content = res.document.export_to_markdown()
-                md_path = file_path + ".md"
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(md_content)
-            except Exception as e:
-                print(f"!!! Erreur export Markdown pour aperçu: {e}")
-
-        # Indexation finale avec génération de Brain States (Phase 3)
-        if all_final_chunks:
-            print(f"--- [CPS] Génération des Brain States pour {len(all_final_chunks)} segments... ---")
-            for chunk in all_final_chunks:
-                try:
-                    # Capturer le KV-cache pour ce chunk
-                    # On utilise l'epoch 2026 pour le RAG
-                    stream = self.hook.extract_brain_state(chunk.page_content, epoch_id=2026)
-                    # Stockage en Hex dans les métadonnées (Teleportation Ready)
-                    chunk.metadata['brain_state'] = stream.getvalue().hex()
-                except Exception as e:
-                    print(f"!!! Erreur Brain State pour un chunk: {e}")
-                    chunk.metadata['brain_state'] = ""
-
-            texts = filter_complex_metadata(all_final_chunks)
-            if self.vector_db is None:
-                self.vector_db = Chroma.from_documents(
-                    documents=texts, 
-                    embedding=self.embeddings, 
-                    persist_directory=self.db_path
-                )
+        if texts:
+            if not self.vector_db:
+                self.vector_db = Chroma.from_texts(texts=texts, embedding=self.embeddings, persist_directory=self.db_path, metadatas=metadatas)
             else:
-                self.vector_db.add_documents(texts)
-            print(f"--- [SUCCES] {len(texts)} segments avec Brain States indexés ! ---")
+                self.vector_db.add_texts(texts=texts, metadatas=metadatas)
+            
+            gc.collect()
+            torch.cuda.empty_cache()
+            return len(texts)
+        return 0
         
-        gc.collect()
-        return len(all_final_chunks)
+        return 0
 
-    def ask(self, query, history=None):
-        if self.vector_db is None:
-            yield "Aucun document n'a été analysé."
+    def ask(self, query, history=[]):
+        if not self.vector_db:
+            yield "Base de données non initialisée."
             return
-        
+
+        # 0. Condense Question (pour eviter la pollution du Retrieval)
         search_query = query
-        if history and len(history) > 0:
-            llm_rewriter = ChatOllama(model="mistral-nemo", temperature=0)
-            # Prompt plus directif pour la reformulation
-            rewrite_prompt = f"""HISTORIQUE DES DERNIERS ÉCHANGES :
-{json.dumps(history[-3:], ensure_ascii=False)}
-
-NOUVELLE QUESTION : {query}
-
-MISSION : Reformule la NOUVELLE QUESTION pour une recherche vectorielle. 
-IMPORTANT : Ignore les contraintes des questions précédentes (ex: "naturel") si l'utilisateur semble élargir le sujet (ex: "quelles solutions ?"). Capture l'essence de la demande actuelle.
-RÈGLE : Réponds UNIQUEMENT par la question reformulée. Pas de blabla."""
+        if history:
+            # On demande au modele de reformuler pour la recherche
+            condense_prompt = [
+                {"role": "system", "content": "You are a research assistant. Rewrite the user's question to be a standalone search query based on the chat history. Output ONLY the standalone query."},
+            ]
+            # Ajouter l'historique recent
+            for msg in history[-3:]:
+                condense_prompt.append(msg)
+            condense_prompt.append({"role": "user", "content": f"Rewrite this question for a PDF search: {query}"})
             
-            res = llm_rewriter.invoke(rewrite_prompt)
-            search_query = res.content.strip().replace('"', '')
-            print(f"--- [DEBUG] Recherche reformulée : {search_query} ---")
+            inputs = self.processor.apply_chat_template(condense_prompt, add_generation_prompt=True, return_tensors="pt").to("cuda")
+            with torch.no_grad():
+                gen = self.model.generate(**inputs, max_new_tokens=50, do_sample=False)
+            search_query = self.processor.decode(gen[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+            print(f"--- [RAG] Query Condensee : {search_query} ---")
 
-        # 2. Recherche avec filtre de pertinence (seuil de distance)
-        docs_with_scores = self.vector_db.similarity_search_with_score(search_query, k=10)
+        # 1. Retrieval (utilise la query condensee)
+        import time
+        start_retrieval = time.time()
+        print(f"--- [RAG] Recherche : {search_query} ---")
+        docs = self.vector_db.similarity_search(search_query, k=2) 
+        print(f"--- [RAG] Retrieval termine en {time.time() - start_retrieval:.2f}s ---")
         
-        # Filtrage : On ne garde que ce qui est en-dessous de 0.7 (plus permissif pour éviter les faux négatifs)
-        THRESHOLD = 0.7
-        valid_docs = []
-        for doc, score in docs_with_scores:
-            if score < THRESHOLD:
-                valid_docs.append(doc)
-            else:
-                print(f"--- [INFO] Segment rejeté (Pertinence : {score:.2f} > {THRESHOLD}) ---")
-
-        sources = []
-        for d in valid_docs:
-            sources.append({
-                "page": d.metadata.get("page", 1),
-                "file": d.metadata.get("source_name", "Inconnu"),
-                "url": d.metadata.get("file_url", "")
-            })
-        
-        if sources:
-            yield f"SOURCES_JSON:{json.dumps(sources)}\n"
-        
-        context = "\n---\n".join([f"[Source: {d.metadata.get('source_name')} - Page {d.metadata.get('page')}]\n{d.page_content}" for d in valid_docs])
-        
-        # [CPS INTEGRATION] Generate visual matrix for the context
-        if valid_docs:
-            try:
-                # On encode le contexte complet pour le transport sécurisé
-                cps_stream = self.cps.encode_stream(context, epoch_id=2026)
-                cps_base64 = cps_stream.getvalue().hex() # Transport simple via hex pour le POC
-                yield f"CPS_MATRIX:{cps_base64}\n"
-                print(f"--- [CPS] Matrice générée ({len(cps_base64)//2} octets) ---")
-            except Exception as e:
-                print(f"--- [CPS] Erreur encodage : {e} ---")
-
-        if not valid_docs:
-            context = "AUCUN DOCUMENT PERTINENT TROUVÉ DANS LA BASE DE DONNÉES."
-        
-        # [PHASE 3] Inférence via Injection de Brain State (Instant Prefill)
-        if valid_docs:
-            print("--- [CPS] Téléportation neuronale en cours... ---")
-            # On prend le document le plus pertinent (ou on pourrait concaténer)
-            best_doc = valid_docs[0]
-            hex_state = best_doc.metadata.get("brain_state", "")
-            
-            if hex_state:
-                try:
-                    stream = io.BytesIO(bytes.fromhex(hex_state))
-                    
-                    # Construction du prompt final (Instruction)
-                    instruction = f"\n\nQuestion: {query}\nExpert Scientifique: "
-                    
-                    # Injection & Génération
-                    # Note: inject_brain_state retourne (outputs, tokenizer)
-                    outputs, tokenizer = self.hook.inject_brain_state(stream, next_text=instruction)
-                    
-                    # Décodage de la réponse
-                    # On ne veut que ce qui vient après l'instruction
-                    generated_ids = outputs.logits.argmax(dim=-1)
-                    # Note: La logique de streaming devra être adaptée ici pour un vrai SSE
-                    # Pour le POC, on génère une réponse complète ou on utilise un streamer
-                    
-                    # Version simplifiée pour le POC (Non-streaming mais instantané)
-                    # On pourrait utiliser un TextStreamer de HuggingFace
-                    
-                    full_response = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                    # On nettoie pour ne garder que la réponse à la question
-                    if "Expert Scientifique:" in full_response:
-                        full_response = full_response.split("Expert Scientifique:")[-1].strip()
-                    
-                    yield full_response
-                    
-                except Exception as e:
-                    print(f"!!! Erreur Injection : {e}")
-                    yield f"❌ Erreur de téléportation : {e}. Fallback vers texte..."
-                    # Fallback textuel si l'injection échoue
-            else:
-                yield "⚠️ Brain State non disponible pour ce segment. Utilisation du texte standard..."
-        else:
+        if not docs:
             yield "Aucun document pertinent trouvé."
+            return
 
-engine = RAGEngine()
+        # 2. Phase 3 Injection (Neural Teleportation)
+        start_injection = time.time()
+        context_parts = []
+        sources_info = []
+        for i, doc in enumerate(docs):
+            # Recuperation de la texture neurale
+            img_path = doc.metadata.get("brain_state_img", "")
+            file_name = os.path.basename(doc.metadata.get("source", "Document inconnu"))
+            page_num = doc.metadata.get("page", "?")
+            
+            sources_info.append({
+                "id": i + 1,
+                "file": file_name,
+                "page": page_num,
+                "content": doc.page_content[:200] + "...",
+                "metadata": doc.metadata
+            })
+            
+            if img_path and os.path.exists(img_path):
+                print(f"--- [CPS] Teleportation depuis la Texture Neurale ({os.path.basename(img_path)})... ---")
+                try:
+                    # Lecture binaire directe (EXR Natif)
+                    with open(img_path, "rb") as f:
+                        brain_stream = io.BytesIO(f.read())
+                        # Injection directe via le Hub
+                        self.hook.inject_brain_state(brain_stream)
+                except Exception as e:
+                    print(f"!!! [CPS] Echec teleportation pour {img_path}: {e}")
+                    # On continue pour ne pas bloquer toute la reponse
+            
+            context_parts.append(doc.page_content)
+        
+        print(f"--- [CPS] Injection terminee en {time.time() - start_injection:.2f}s ---")
+        
+        # Envoi des sources au frontend
+        yield {"sources": sources_info}
+
+        # 3. Generation (Hybride : Injection Neuronale + Rappel Texte)
+        print(f"--- [LLM] Lancement de la generation... ---")
+        start_gen = time.time()
+        
+        # Nettoyage cache pour maximiser la VRAM LLM
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # 3. Generation (Nitro-Fast with Native Template)
+        context = "\n\n".join(context_parts)
+        
+        messages = [
+            {"role": "system", "content": f"Tu es un expert en ingenierie structurelle. Reponds de maniere precise en utilisant le contexte suivant extrait de documents techniques. Si l'information n'est pas dans le contexte, dis-le.\n\nCONTEXTE RAG:\n{context}"}
+        ]
+        
+        # Injection de l'historique pour la continuite
+        for msg in history:
+            messages.append(msg)
+            
+        # Question actuelle
+        messages.append({"role": "user", "content": query})
+        
+        print("--- [LLM] Lancement de la generation... ---")
+        prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        
+        inputs = self.processor(prompt, return_tensors="pt").to("cuda")
+        
+        # Generation Stream
+        from transformers import TextIteratorStreamer
+        streamer = TextIteratorStreamer(self.processor, skip_prompt=True, skip_special_tokens=True)
+        
+        generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=1024, do_sample=True, temperature=0.3)
+        thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+        thread.start()
+        
+        first_token = True
+        for new_text in streamer:
+            if first_token:
+                print(f"--- [LLM] Premier jeton genere en {time.time() - start_gen:.2f}s ---")
+                first_token = False
+            yield new_text
+
+if __name__ == "__main__":
+    print("--- [RAG] Test du moteur unifie ---")
+    # Ce bloc est pour le test local uniquement
+    # engine = RAGEngine()
+    pass
