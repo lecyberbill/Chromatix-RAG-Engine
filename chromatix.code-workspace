@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "../chromatix"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"window.autoDetectColorScheme": true
+	}
+}

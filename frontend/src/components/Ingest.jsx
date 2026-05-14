@@ -68,9 +68,9 @@ const Ingest = () => {
 
   // Sync uploadProgress with globalProgress
   React.useEffect(() => {
-    if (globalProgress.status === 'complete' && globalProgress.filename) {
+    if (globalProgress.status === 'complete' && globalProgress.original_name) {
       setUploadProgress(prev => {
-        const next = { ...prev, [globalProgress.filename]: 'success' };
+        const next = { ...prev, [globalProgress.original_name]: 'success' };
         
         // Verifier si c'est le TOUT DERNIER fichier
         const allDone = files.every(f => next[f.name] === 'success');
@@ -81,8 +81,11 @@ const Ingest = () => {
         
         return next;
       });
+    } else if (globalProgress.status === 'error' && globalProgress.original_name) {
+      setUploadProgress(prev => ({ ...prev, [globalProgress.original_name]: 'error' }));
+      setIsUploading(false);
     }
-  }, [globalProgress.status, globalProgress.filename, files]);
+  }, [globalProgress.status, globalProgress.original_name, files]);
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 py-8">

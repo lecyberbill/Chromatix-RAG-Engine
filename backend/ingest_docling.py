@@ -47,11 +47,11 @@ def run_ingestion(pdf_path):
 
     # 2. Capture des Brain States (Nécessite de charger le modèle temporairement)
     print("--- [INGESTOR] Chargement temporaire du modèle pour capture neuronale... ---")
-    model_id = "mistralai/Mistral-Nemo-Instruct-2407"
+    model_id = "google/gemma-4-E2B-it"
     bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16)
     
-    model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=bnb_config, device_map={"": 0})
-    hook = TransformersHook(model, "RAG-SECURE-STREAM")
+    model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=bnb_config, device_map={"": 0}, trust_remote_code=True)
+    hook = TransformersHook(model, master_key="RAG-SECURE-STREAM")
     
     # 3. Embeddings
     from transformers import AutoModel, AutoTokenizer

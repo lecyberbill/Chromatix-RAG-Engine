@@ -7,6 +7,7 @@ import sys
 import uuid
 import io
 import time
+from threading import Thread
 
 # Chromatix CPS
 from chromatix_cps.core import CPSPacket
@@ -327,91 +328,116 @@ class RAGEngine:
         import time
         start_retrieval = time.time()
         print(f"--- [RAG] Recherche : {search_query} ---")
-        docs = self.vector_db.similarity_search(search_query, k=2) 
+        docs = self.vector_db.similarity_search(search_query, k=1) 
         print(f"--- [RAG] Retrieval termine en {time.time() - start_retrieval:.2f}s ---")
         
         if not docs:
             yield "Aucun document pertinent trouvé."
             return
 
-        # 2. Phase 3 Injection (Neural Teleportation)
+        doc = docs[0] # Top-1 for Nitro-Boost stability
+        
+        # Construction d'un objet metadata propre pour le frontend
+        clean_metadata = {
+            "source": doc.metadata.get("source", "Doc"),
+            "page": doc.metadata.get("page", 1)
+        }
+        img_path = doc.metadata.get("brain_state_img", "")
+        
+        sources_info = [{
+            "id": 1, 
+            "file": os.path.basename(clean_metadata["source"]), 
+            "page": clean_metadata["page"], 
+            "content": doc.page_content[:200],
+            "metadata": clean_metadata
+        }]
+
+        # 2. Preparation du Prompt (Standard Gemma 4)
+        # On utilise le template officiel pour eviter les repetitions infinies
+        messages = [
+            {"role": "user", "content": f"Voici un extrait du document :\n\n{doc.page_content}\n\nQuestion : {query}\nRéponds de manière concise."}
+        ]
+        full_instruction = self.processor.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        
         start_injection = time.time()
-        context_parts = []
-        sources_info = []
-        for i, doc in enumerate(docs):
-            # Recuperation de la texture neurale
-            img_path = doc.metadata.get("brain_state_img", "")
-            file_name = os.path.basename(doc.metadata.get("source", "Document inconnu"))
-            page_num = doc.metadata.get("page", "?")
-            
-            sources_info.append({
-                "id": i + 1,
-                "file": file_name,
-                "page": page_num,
-                "content": doc.page_content[:200] + "...",
-                "metadata": doc.metadata
-            })
-            
-            if img_path and os.path.exists(img_path):
-                print(f"--- [CPS] Teleportation depuis la Texture Neurale ({os.path.basename(img_path)})... ---")
-                try:
-                    # Lecture binaire directe (EXR Natif)
-                    with open(img_path, "rb") as f:
-                        brain_stream = io.BytesIO(f.read())
-                        # Injection directe via le Hub
-                        self.hook.inject_brain_state(brain_stream)
-                except Exception as e:
-                    print(f"!!! [CPS] Echec teleportation pour {img_path}: {e}")
-                    # On continue pour ne pas bloquer toute la reponse
-            
-            context_parts.append(doc.page_content)
+        pkv = None
         
-        print(f"--- [CPS] Injection terminee en {time.time() - start_injection:.2f}s ---")
-        
-        # Envoi des sources au frontend
+        if img_path and os.path.exists(img_path):
+            print(f"--- [CPS] Teleportation One-Shot ({os.path.basename(img_path)})... ---")
+            try:
+                with open(img_path, "rb") as f:
+                    brain_stream = io.BytesIO(f.read())
+                    # Injection du Doc uniquement dans le pkv
+                    _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv)
+                
+                # [NITRO] L'instruction est envoyée APRES l'injection du cache
+                # Comme le cache contient le document brut, on envoie le template complet de la query
+                tokens = self.processor.tokenizer(full_instruction, return_tensors="pt", add_special_tokens=False).to("cuda")
+                input_ids = tokens.input_ids
+            except Exception as e:
+                print(f"!!! [CPS_FAILURE] Erreur lors de l'injection : {e}")
+                import traceback
+                traceback.print_exc()
+                img_path = None # Force fallback standard
+
+        if not img_path or not os.path.exists(img_path):
+            # Fallback standard : On utilise le même prompt formaté
+            print("--- [CPS] Fallback sur prefill standard (Mode Safe) ---")
+            tokens = self.processor.tokenizer(full_instruction, return_tensors="pt", add_special_tokens=False).to("cuda")
+            input_ids = tokens.input_ids
+            pkv = None
+
+        print(f"--- [CPS] Nitro-Boost termine en {time.time() - start_injection:.2f}s ---")
         yield {"sources": sources_info}
 
-        # 3. Generation (Hybride : Injection Neuronale + Rappel Texte)
+        # 3. Generation Stream
         print(f"--- [LLM] Lancement de la generation... ---")
         start_gen = time.time()
         
-        # Nettoyage cache pour maximiser la VRAM LLM
-        torch.cuda.empty_cache()
-        gc.collect()
-        
-        # 3. Generation (Nitro-Fast with Native Template)
-        context = "\n\n".join(context_parts)
-        
-        messages = [
-            {"role": "system", "content": f"Tu es un expert en ingenierie structurelle. Reponds de maniere precise en utilisant le contexte suivant extrait de documents techniques. Si l'information n'est pas dans le contexte, dis-le.\n\nCONTEXTE RAG:\n{context}"}
-        ]
-        
-        # Injection de l'historique pour la continuite
-        for msg in history:
-            messages.append(msg)
-            
-        # Question actuelle
-        messages.append({"role": "user", "content": query})
-        
-        print("--- [LLM] Lancement de la generation... ---")
-        prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        
-        inputs = self.processor(prompt, return_tensors="pt").to("cuda")
-        
-        # Generation Stream
         from transformers import TextIteratorStreamer
-        streamer = TextIteratorStreamer(self.processor, skip_prompt=True, skip_special_tokens=True)
+        streamer = TextIteratorStreamer(self.processor.tokenizer, skip_prompt=True, skip_special_tokens=True)
         
-        generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=1024, do_sample=True, temperature=0.3)
-        thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+        # [NITRO] Masque d'attention explicite pour lier le cache CPS au prompt
+        past_len = pkv.get_seq_length() if pkv is not None else 0
+        current_len = input_ids.shape[1]
+        attention_mask = torch.ones((1, past_len + current_len), device="cuda")
+        
+        print(f"      [DEBUG_GEN] Input: {current_len} | Cache: {past_len} | Total Mask: {attention_mask.shape}", flush=True)
+        
+        generation_kwargs = dict(
+            input_ids=input_ids, 
+            past_key_values=pkv,
+            attention_mask=attention_mask,
+            use_cache=True,
+            streamer=streamer, 
+            max_new_tokens=1024, 
+            do_sample=True, 
+            temperature=0.3
+        )
+        
+        def safe_generate(**kwargs):
+            try:
+                self.model.generate(**kwargs)
+            except Exception as e:
+                print(f"!!! [CRITICAL] Crash generate: {e}")
+                import traceback
+                traceback.print_exc()
+
+        thread = Thread(target=safe_generate, kwargs=generation_kwargs)
         thread.start()
         
         first_token = True
+        generated_count = 0
         for new_text in streamer:
             if first_token:
                 print(f"--- [LLM] Premier jeton genere en {time.time() - start_gen:.2f}s ---")
                 first_token = False
+            generated_count += 1
             yield new_text
+            
+        if generated_count == 0:
+            print("!!! [LLM] Aucun jeton genere.")
+            yield "Désolé, je n'ai pas pu générer de réponse."
 
 if __name__ == "__main__":
     print("--- [RAG] Test du moteur unifie ---")

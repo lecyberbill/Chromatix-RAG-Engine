@@ -146,10 +146,10 @@ const Chat = ({ onSelectPdf }) => {
                         <div 
                           key={sidx}
                           onClick={() => {
-                            const fileName = src.metadata.source.split(/[\\/]/).pop();
+                            const fileName = src.metadata?.source?.split(/[\\/]/).pop() || "Document";
                             onSelectPdf({
                               name: fileName,
-                              page: src.metadata.page || 1
+                              page: src.metadata?.page || 1
                             });
                           }}
                           className="px-2 py-1 bg-white/5 border border-white/10 rounded-md text-[10px] flex items-center gap-2 hover:bg-primary/20 hover:border-primary/30 transition-all cursor-pointer group"
@@ -157,7 +157,7 @@ const Chat = ({ onSelectPdf }) => {
                         >
                           <FileText size={12} className="text-primary group-hover:scale-110 transition-transform" />
                           <span className="font-medium">{src.file}</span>
-                          {src.metadata.page && (
+                          {src.metadata?.page && (
                             <span className="opacity-50 text-[9px]">p.{src.metadata.page}</span>
                           )}
                         </div>
@@ -200,9 +200,6 @@ const Chat = ({ onSelectPdf }) => {
             {isLoading ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
           </button>
         </form>
-        <p className="text-[10px] text-center text-text-muted mt-3 uppercase tracking-tighter opacity-50">
-          Powered by Chromatix Neural Engine & Mistral-Nemo
-        </p>
       </div>
     </div>
   );
