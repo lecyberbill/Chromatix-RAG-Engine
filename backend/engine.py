@@ -309,53 +309,92 @@ class RAGEngine:
         # 0. Condense Question (pour eviter la pollution du Retrieval)
         search_query = query
         if history:
-            # On demande au modele de reformuler pour la recherche
             condense_prompt = [
-                {"role": "system", "content": "You are a research assistant. Rewrite the user's question to be a standalone search query based on the chat history. Output ONLY the standalone query."},
+                {
+                    "role": "system", 
+                    "content": "Tu es un assistant de recherche scientifique. Formule une requête de recherche sémantique en français, ultra-précise et complète pour un moteur RAG, en combinant la nouvelle question de l'utilisateur avec le sujet de l'historique récent de la discussion. Ne réponds pas à la question, écris uniquement la requête de recherche reformulée. Exemple : pour la question 'quel est son contexte historique ?' après avoir parlé de la poussée progressive, écris 'contexte historique de la poussée progressive'."
+                },
             ]
             # Ajouter l'historique recent
             for msg in history[-3:]:
                 condense_prompt.append(msg)
-            condense_prompt.append({"role": "user", "content": f"Rewrite this question for a PDF search: {query}"})
+            condense_prompt.append({"role": "user", "content": f"Reformule cette question pour une recherche sémantique dans le PDF : {query}"})
             
-            inputs = self.processor.apply_chat_template(condense_prompt, add_generation_prompt=True, return_tensors="pt").to("cuda")
+            condensed_prompt_str = self.processor.tokenizer.apply_chat_template(condense_prompt, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor.tokenizer(condensed_prompt_str, return_tensors="pt").to("cuda")
             with torch.no_grad():
                 gen = self.model.generate(**inputs, max_new_tokens=50, do_sample=False)
-            search_query = self.processor.decode(gen[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+            search_query = self.processor.tokenizer.decode(gen[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
             print(f"--- [RAG] Query Condensee : {search_query} ---")
 
         # 1. Retrieval (utilise la query condensee)
         import time
         start_retrieval = time.time()
         print(f"--- [RAG] Recherche : {search_query} ---")
-        docs = self.vector_db.similarity_search(search_query, k=1) 
+        docs = self.vector_db.similarity_search(search_query, k=3) 
         print(f"--- [RAG] Retrieval termine en {time.time() - start_retrieval:.2f}s ---")
         
         if not docs:
             yield "Aucun document pertinent trouvé."
             return
 
-        doc = docs[0] # Top-1 for Nitro-Boost stability
-        
-        # Construction d'un objet metadata propre pour le frontend
-        clean_metadata = {
-            "source": doc.metadata.get("source", "Doc"),
-            "page": doc.metadata.get("page", 1)
-        }
+        # Top-1 is used for Chromatix physical KV cache teleportation
+        doc = docs[0] 
         img_path = doc.metadata.get("brain_state_img", "")
         
-        sources_info = [{
-            "id": 1, 
-            "file": os.path.basename(clean_metadata["source"]), 
-            "page": clean_metadata["page"], 
-            "content": doc.page_content[:200],
-            "metadata": clean_metadata
-        }]
+        # [SLIDING WINDOW NEIGHBORS] Retrieve preceding (page-1) and succeeding (page+1) pages for the Top-1 match
+        top_page = doc.metadata.get("page", 1)
+        source_path = doc.metadata.get("source", "")
+        
+        enriched_docs = list(docs) # Start with matched documents
+        already_present_pages = {d.metadata.get("page") for d in enriched_docs}
+        
+        if source_path:
+            print(f"--- [RAG] Chargement du voisinage glissant (Page {top_page}) ---")
+            for p_offset in [-1, 1]:
+                neighbor_page = top_page + p_offset
+                if neighbor_page > 0 and neighbor_page not in already_present_pages:
+                    try:
+                        res = self.vector_db.get(where={"$and": [{"source": source_path}, {"page": neighbor_page}]})
+                        if res and res["documents"]:
+                            from langchain_core.documents import Document
+                            new_doc = Document(
+                                page_content=res["documents"][0],
+                                metadata=res["metadatas"][0]
+                            )
+                            enriched_docs.append(new_doc)
+                            already_present_pages.add(neighbor_page)
+                            print(f"   [+] Voisin charge: Page {neighbor_page}")
+                    except Exception as e:
+                        print(f"   [!] Erreur chargement voisin page {neighbor_page}: {e}")
+                        
+        # Sort enriched documents by page number for reading flow consistency
+        enriched_docs.sort(key=lambda d: d.metadata.get("page", 1))
+
+        # Build comprehensive sources information list for all loaded pages
+        sources_info = []
+        for idx, d in enumerate(enriched_docs):
+            src_metadata = {
+                "source": d.metadata.get("source", "Doc"),
+                "page": d.metadata.get("page", 1)
+            }
+            sources_info.append({
+                "id": idx + 1, 
+                "file": os.path.basename(src_metadata["source"]), 
+                "page": src_metadata["page"], 
+                "content": d.page_content[:200],
+                "metadata": src_metadata
+            })
+
+        # Combine all matched pages content to let the model see the global context
+        context_text = "\n\n---\n\n".join([
+            f"[Page {d.metadata.get('page', 1)}]:\n{d.page_content}" 
+            for d in enriched_docs
+        ])
 
         # 2. Preparation du Prompt (Standard Gemma 4)
-        # On utilise le template officiel pour eviter les repetitions infinies
         messages = [
-            {"role": "user", "content": f"Voici un extrait du document :\n\n{doc.page_content}\n\nQuestion : {query}\nRéponds de manière concise."}
+            {"role": "user", "content": f"Voici des extraits du document :\n\n{context_text}\n\nQuestion : {query}\nRéponds de manière concise et précise, en citant les numéros de page si nécessaire."}
         ]
         full_instruction = self.processor.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         

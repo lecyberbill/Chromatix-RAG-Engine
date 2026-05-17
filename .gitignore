@@ -9,3 +9,5 @@ temp_docs/
 *.log
 .env
 access_test.txt
+scratch/
+test/
