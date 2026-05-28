@@ -1,3 +1,4 @@
+# [WFGY] Zone: TRANSIT | λ: 0.1 | Action: Update status endpoint model name
 import os
 import sys
 import uuid
@@ -15,7 +16,22 @@ sys.path.append(r"d:\image_to_text\chromatix")
 from fastapi.staticfiles import StaticFiles
 from backend.engine import RAGEngine
 
-app = FastAPI(title="Chromatix Neural RAG Workstation")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("\n" + "="*60)
+    print("   [STARTUP] DÉMARRAGE DU SERVEUR DE NEURAL RAG WORKSTATION")
+    print("   [STARTUP] Initialisation anticipée du modèle Ministral-3 FP8...")
+    print("   [STARTUP] Note: La compilation des kernels Triton s'exécute")
+    print("             au premier démarrage ou prefill (attente possible).")
+    print("="*60 + "\n", flush=True)
+    
+    # Lancement non bloquant dans un thread séparé
+    asyncio.create_task(asyncio.to_thread(get_engine))
+    yield
+
+app = FastAPI(title="Chromatix Neural RAG Workstation", lifespan=lifespan)
 
 # Assurer la presence des dossiers de données
 os.makedirs("data/pdfs", exist_ok=True)
@@ -38,8 +54,12 @@ engine = None
 def get_engine():
     global engine
     if engine is None:
-        print("--- [API] Initialisation du moteur RAG... ---")
+        print("--- [API] Initialisation du moteur RAG... ---", flush=True)
         engine = RAGEngine()
+        print("\n" + "="*60)
+        print("   [STARTUP] MOTEUR CHARGÉ ET INITIALISÉ SUR GPU (VRAM OK)")
+        print("   [STARTUP] Serveur FastAPI prêt à écouter les requêtes")
+        print("="*60 + "\n", flush=True)
     return engine
 
 from typing import List
@@ -50,7 +70,7 @@ class QueryRequest(BaseModel):
 
 @app.get("/status")
 async def get_status():
-    return {"status": "ready", "model": "Mistral-Nemo-12B-Instruct"}
+    return {"status": "ready", "model": "mistralai/Ministral-3-8B-Instruct-2512"}
 
 @app.post("/ingest")
 async def ingest_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
@@ -126,16 +146,34 @@ async def ask_question(request: QueryRequest):
     rag = get_engine()
     
     async def event_generator():
+        q = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+        
+        def producer():
+            try:
+                for item in rag.ask(request.query, history=request.history):
+                    loop.call_soon_threadsafe(q.put_nowait, item)
+            except Exception as e:
+                loop.call_soon_threadsafe(q.put_nowait, {"error": str(e)})
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, None)
+
+        # Start the blocking generator in a background thread
+        loop.run_in_executor(None, producer)
+
         try:
-            # On utilise le générateur de l'engine
-            for item in rag.ask(request.query, history=request.history):
-                # Si c'est un dictionnaire (ex: sources), on le JSONify directement
+            while True:
+                item = await q.get()
+                if item is None:
+                    break
                 if isinstance(item, dict):
-                    yield f"data: {json.dumps(item)}\n\n"
+                    if "error" in item:
+                        yield f"data: {json.dumps(item)}\n\n"
+                    else:
+                        yield f"data: {json.dumps(item)}\n\n"
                 else:
-                    # Sinon c'est un chunk de texte
                     yield f"data: {json.dumps({'chunk': item})}\n\n"
-                await asyncio.sleep(0.01)
+                q.task_done()
             yield "data: [DONE]\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
