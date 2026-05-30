@@ -55,7 +55,7 @@ def get_engine():
     global engine
     if engine is None:
         print("--- [API] Initialisation du moteur RAG... ---", flush=True)
-        engine = RAGEngine()
+        engine = RAGEngine(step_seq=2, zstd_level=3)
         print("\n" + "="*60)
         print("   [STARTUP] MOTEUR CHARGÉ ET INITIALISÉ SUR GPU (VRAM OK)")
         print("   [STARTUP] Serveur FastAPI prêt à écouter les requêtes")

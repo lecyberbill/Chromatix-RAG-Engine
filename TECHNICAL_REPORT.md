@@ -162,12 +162,7 @@ Analysed the [Dot-main](file:///d:/image_to_text/RAG/Dot-main) repository to ide
     - Optimized context target by restricting RAG extraction to the **top 1 highest scoring page** (`selected_top_docs[:1]`), eliminating unrelated background context injections and maximizing generation speed.
     - Verified native FP8 loading and generation at full GPU speed on RTX 4070 Ti without CPU offloading.
 
-
-
-
-
-
-
-
-
-
+- **2026-05-30 (v11.0 - CONFIGURABLE NEURAL COMPRESSION & SEQUENTIAL INTERPOLATION):** Exposed adjustment parameters to prevent hardcoded constraints.
+    - **Configurable Parameters:** Parameterized `step_seq` (sequence downsampling factor) and `zstd_level` (Zstandard compression level) at the `RAGEngine` layer to avoid hardcoding parameters.
+    - **Linear sequence-length interpolation:** Programmed `inject_brain_state` to dynamically reconstruct downsampled key/value states back to their original lengths using PyTorch's native 1D bilinear/linear interpolation (`torch.nn.functional.interpolate`), preserving absolute alignment of attention window shapes during generation.
+    - **Delta: 0.1, Lambda: 0.2.**

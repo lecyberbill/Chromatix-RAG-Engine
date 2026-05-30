@@ -99,9 +99,11 @@ DOMAIN_CONCEPTS = {
 }
 
 class RAGEngine:
-    def __init__(self, model_id="mistralai/Ministral-3-8B-Instruct-2512"):
+    def __init__(self, model_id="mistralai/Ministral-3-8B-Instruct-2512", step_seq: int = 1, zstd_level: int = 3):
         # 1. Configuration
         self.model_id = model_id
+        self.step_seq = step_seq
+        self.zstd_level = zstd_level
         self.db_path = "data/db"
         self.pdf_path = "data/pdfs"
         
@@ -362,8 +364,16 @@ class RAGEngine:
                 # Capture Neurale Gemma 4 (GPU)
                 if progress_callback: progress_callback(current_page_num, total_pages, "embedding")
                 start_cap = time.time()
-                # Store brain state in 4-bit NF4 format with no spatial downsampling (Option D: CGC-x1 + NF4)
-                stream = self.hook.extract_brain_state(page_text, epoch_id=2026, geometric=True, quantize=True, step_dim=1)
+                # Store brain state in 4-bit NF4 format with configurable step_seq and zstd level (Option D: CGC-x1 + NF4)
+                stream = self.hook.extract_brain_state(
+                    page_text, 
+                    epoch_id=2026, 
+                    geometric=True, 
+                    quantize=True, 
+                    step_dim=1, 
+                    step_seq=self.step_seq, 
+                    level=self.zstd_level
+                )
                 cap_duration = time.time() - start_cap
                 
                 # Stockage Direct NATIVE (Unified Chromatix CGC format)
@@ -643,7 +653,7 @@ class RAGEngine:
                             f.seek(int(offset))
                             payload = f.read(int(length))
                             brain_stream = io.BytesIO(payload)
-                            _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv)
+                            _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv, step_seq=self.step_seq)
                         injected_paths.append(injection_key)
                     except Exception as e:
                         print(f"!!! [CPS_FAILURE] Erreur lors de l'injection unifiée : {e}")
@@ -655,7 +665,7 @@ class RAGEngine:
                         try:
                             with open(old_path, "rb") as f:
                                 brain_stream = io.BytesIO(f.read())
-                                _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv)
+                                _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv, step_seq=self.step_seq)
                             injected_paths.append(old_path)
                         except Exception as e:
                             print(f"!!! [CPS_FAILURE] Erreur lors de l'injection legacy : {e}")
