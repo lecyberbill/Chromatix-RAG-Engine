@@ -1,4 +1,4 @@
-# [WFGY] Zone: SAFE | λ: 0.5 | Action: Migrate LLM to Ministral-8B-Instruct-2410 with 4-bit Quantization
+# [WFGY] Zone: TRANSIT | λ: 0.4 | Action: Switch RAG to Gemma-4 with shape-aligned SDPA patch
 import os
 import torch
 from PIL import Image
@@ -27,6 +27,7 @@ from docling.datamodel.base_models import InputFormat
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Mistral3ForConditionalGeneration, MistralCommonBackend
 from transformers.cache_utils import DynamicCache
 from typing import Optional
+import transformers.integrations.sdpa_attention as sdpa_module
 
 from langchain_chroma import Chroma
 
@@ -99,13 +100,40 @@ DOMAIN_CONCEPTS = {
 }
 
 class RAGEngine:
-    def __init__(self, model_id="mistralai/Ministral-3-8B-Instruct-2512", step_seq: int = 1, zstd_level: int = 3):
+    def __init__(self, model_id="google/gemma-4-E2B-it", step_seq: int = 2, zstd_level: int = 3):
         # 1. Configuration
         self.model_id = model_id
         self.step_seq = step_seq
         self.zstd_level = zstd_level
         self.db_path = "data/db"
         self.pdf_path = "data/pdfs"
+        
+        # Apply Gemma 4 patches dynamically if loading Gemma 4
+        if "gemma-4" in self.model_id:
+            print("--- [LLM] Appliquant les patches d'attention/cache Gemma-4... ---")
+            # 1. SDPA Forward Patch to prevent shape mismatch crashes
+            original_sdpa_attention_forward = sdpa_module.sdpa_attention_forward
+            def custom_sdpa_attention_forward(module, query, key, value, attention_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
+                if attention_mask is not None:
+                    mask_seq_len = attention_mask.shape[-1]
+                    key_seq_len = key.shape[-2]
+                    if mask_seq_len != key_seq_len:
+                        if mask_seq_len < key_seq_len:
+                            padding_size = key_seq_len - mask_seq_len
+                            padding = torch.zeros((*attention_mask.shape[:-1], padding_size), device=attention_mask.device, dtype=attention_mask.dtype)
+                            attention_mask = torch.cat([padding, attention_mask], dim=-1)
+                        else:
+                            attention_mask = attention_mask[..., :key_seq_len]
+                return original_sdpa_attention_forward(module, query, key, value, attention_mask=attention_mask, dropout_p=dropout_p, is_causal=is_causal, **kwargs)
+            sdpa_module.sdpa_attention_forward = custom_sdpa_attention_forward
+
+            # 2. DynamicCache usable length patch
+            def custom_get_usable_length(self, seq_len: int, layer_idx: Optional[int] = None) -> int:
+                if len(self.key_cache) == 0:
+                    return 0
+                idx = layer_idx if (layer_idx is not None and layer_idx < len(self.key_cache)) else 0
+                return self.key_cache[idx].shape[-2]
+            DynamicCache.get_usable_length = custom_get_usable_length
         
         # 1. Embedding Model (Custom Lightweight to avoid sentence-transformers crash)
         model_name = "BAAI/bge-small-en-v1.5"
@@ -133,19 +161,50 @@ class RAGEngine:
             print(f"!!! [EMBEDDINGS] Erreur fatale : {e}")
             raise e
         
-        # Configure 4-bit Quantization Config to run Mistral comfortably on 12GB VRAM
         print(f"--- [LLM] Chargement de {self.model_id}... ---")
         from transformers import AutoProcessor
         
         import time
         start_time = time.time()
         
-        if "Ministral-3-8B-Instruct-2512" in self.model_id:
+        if "gemma-4" in self.model_id:
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True
+            )
+            processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
+            self.tokenizer = processor.tokenizer
+            
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                quantization_config=bnb_config,
+                device_map="cuda",
+                trust_remote_code=True,
+                attn_implementation="sdpa"
+            )
+            
+            # Squeeze logits for Gemma-4 to 3D to eliminate generate dimension crashes
+            original_model_forward = self.model.forward
+            def custom_model_forward(*args, **kwargs):
+                outputs = original_model_forward(*args, **kwargs)
+                if hasattr(outputs, "logits") and outputs.logits is not None:
+                    if len(outputs.logits.shape) == 4 and outputs.logits.shape[1] == 1:
+                        outputs.logits = outputs.logits.squeeze(1)
+                return outputs
+            self.model.forward = custom_model_forward
+            
+            self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=processor, custom_layout=[256, 256, 256, 256, 512]*3)
+            
+        elif "Ministral-3-8B-Instruct-2512" in self.model_id:
             self.model = Mistral3ForConditionalGeneration.from_pretrained(
                 self.model_id,
                 device_map="cuda",
                 trust_remote_code=True
             )
+            self.tokenizer = MistralCommonBackend.from_pretrained(self.model_id)
+            self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=self.tokenizer)
         else:
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -159,7 +218,9 @@ class RAGEngine:
                 device_map="auto",
                 trust_remote_code=True
             )
-        self.tokenizer = MistralCommonBackend.from_pretrained(self.model_id)
+            self.tokenizer = MistralCommonBackend.from_pretrained(self.model_id)
+            self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=self.tokenizer)
+
         if hasattr(self.tokenizer, 'pad_token_id') and self.tokenizer.pad_token_id is None:
             if hasattr(self.tokenizer, 'eos_token_id'):
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
@@ -168,7 +229,6 @@ class RAGEngine:
         
         # 3. Chromatix Hook & CPS
         print("--- [CPS] Initialisation du protocole Pixel Standard (No-Thinking Mode)... ---")
-        self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=self.tokenizer)
         self.cps = CPSPacket(master_key="CHROMATIX-NEURAL-RAG-2026")
         
         # 4. Vector DB
@@ -688,8 +748,12 @@ class RAGEngine:
                 {"role": "user", "content": f"Contexte technique :\n{context_text}\n\nQuestion : {query}\nRéponds de manière concise et précise, en citant les numéros de page si nécessaire."}
             ]
 
-        # Use return_dict=True for MistralCommonBackend apply_chat_template
-        tokenized = self.tokenizer.apply_chat_template(messages, return_tensors="pt", return_dict=True)
+        # Build inputs based on model type
+        if "gemma-4" in self.model_id:
+            formatted_prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            tokenized = self.tokenizer(formatted_prompt, return_tensors="pt", add_special_tokens=False)
+        else:
+            tokenized = self.tokenizer.apply_chat_template(messages, return_tensors="pt", return_dict=True)
         input_ids = tokenized["input_ids"].to("cuda")
 
         # [WFGY] Action: CUDA_CLEANUP_BEFORE_GEN

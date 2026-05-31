@@ -166,3 +166,8 @@ Analysed the [Dot-main](file:///d:/image_to_text/RAG/Dot-main) repository to ide
     - **Configurable Parameters:** Parameterized `step_seq` (sequence downsampling factor) and `zstd_level` (Zstandard compression level) at the `RAGEngine` layer to avoid hardcoding parameters.
     - **Linear sequence-length interpolation:** Programmed `inject_brain_state` to dynamically reconstruct downsampled key/value states back to their original lengths using PyTorch's native 1D bilinear/linear interpolation (`torch.nn.functional.interpolate`), preserving absolute alignment of attention window shapes during generation.
     - **Delta: 0.1, Lambda: 0.2.**
+
+- **2026-05-31 (v12.0 - GEMMA-4 INTEGRATION & MAXIMUM SEQUENCE COMPRESSION):** Returned RAG backend to Gemma-4 model.
+    - **Gemma-4 Rollback:** Configured default model ID to `google/gemma-4-E2B-it` and enabled dynamic attention-mask (`custom_sdpa_attention_forward`) and cache usability (`custom_get_usable_length`) monkey patches.
+    - **Maximum Compression with Feature Integrity:** Enforced `step_dim=1` for key/value feature layout preservation while setting the sequence downsampling default to `step_seq=2` (2x temporal sequence compression) to maximize disk and VRAM storage efficiency.
+    - **Delta: 0.2, Lambda: 0.3.**
