@@ -775,8 +775,15 @@ class RAGEngine:
             past_len = pkv.get_seq_length()
             new_len = input_ids.shape[1]
             attention_mask = torch.ones((1, past_len + new_len), device="cuda", dtype=torch.long)
+            position_ids = torch.arange(past_len, past_len + new_len, device="cuda", dtype=torch.long).unsqueeze(0)
             with torch.no_grad():
-                outputs = self.model(input_ids=input_ids, past_key_values=pkv, attention_mask=attention_mask, use_cache=True)
+                outputs = self.model(
+                    input_ids=input_ids,
+                    past_key_values=pkv,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=True
+                )
                 
             first_token_logits = outputs.logits[:, -1, :]
             first_token_id = torch.argmax(first_token_logits, dim=-1)
