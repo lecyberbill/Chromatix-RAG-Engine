@@ -3,6 +3,8 @@ import { Upload, FileText, Trash2, CheckCircle2, AlertCircle, Loader2, Sparkles 
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 
+const API_BASE = `http://${window.location.hostname}:8000`;
+
 const Ingest = () => {
   const [files, setFiles] = useState([]); // Panier de fichiers
   const [isUploading, setIsUploading] = useState(false);
@@ -28,7 +30,7 @@ const Ingest = () => {
 
   React.useEffect(() => {
     if (isUploading) {
-      const es = new EventSource('http://localhost:8000/ingest_status');
+      const es = new EventSource(`${API_BASE}/ingest_status`);
       es.onmessage = (e) => {
         const data = JSON.parse(e.data);
         setGlobalProgress(data);
@@ -53,7 +55,7 @@ const Ingest = () => {
       formData.append('file', file);
 
       try {
-        await axios.post('http://localhost:8000/ingest', formData, {
+        await axios.post(`${API_BASE}/ingest`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
         // On ne met pas success tout de suite, on attend le SSE pour le status global

@@ -5,6 +5,8 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 
+const API_BASE = `http://${window.location.hostname}:8000`;
+
 const Chat = ({ onSelectPdf }) => {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
@@ -30,7 +32,7 @@ const Chat = ({ onSelectPdf }) => {
     setMessages((prev) => [...prev, { role: 'assistant', content: '', sources: [] }]);
 
     try {
-      const response = await fetch('http://localhost:8000/ask', {
+      const response = await fetch(`${API_BASE}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 

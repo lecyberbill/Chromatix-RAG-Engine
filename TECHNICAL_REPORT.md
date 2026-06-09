@@ -79,3 +79,12 @@ Analysed the [Dot-main](file:///d:/image_to_text/RAG/Dot-main) repository to ide
     - Calculated and passed correct `position_ids` starting at `past_len` (`past_len` -> `past_len + new_len`) during the manual prefill forward pass, resolving prompt positional embeddings overlap.
     - **Performance Gate**: Confirmed VRAM occupancy stabilized at an ultra-low **6.0 GB** total for a 108-page document, with a crystal file size of only **42.3 MB** (~390 KB/page), generating perfect LaTeX formulas.
     - **Delta: 0.1, Lambda: 0.2.**
+
+- **2026-06-09 (v13.0 - CODE REVIEW & REGRESSION FIXES):** Senior engineering audit and corrective maintenance.
+    - **Status Model Alignment:** Fixed `/status` endpoint hardcoded to `Ministral-3-8B` while engine loaded `Gemma-4-E2B-it`. Now returns `engine.model_id` dynamically (`app.py:71`).
+    - **ALL_ATTENTION_FUNCTIONS Monkeypatch Restoration:** Re-added the v6.6 patch absent from the Gemma-4 loading path. Patches `modeling_gemma4.ALL_ATTENTION_FUNCTIONS` in addition to `sdpa_module.sdpa_attention_forward` to intercept the function during module compilation (`engine.py:130-140`).
+    - **Fragile Import Hardening:** Removed top-level `from transformers import MistralCommonBackend` which would crash on transformers versions where this class is not exported. Replaced with lazy local imports inside Mistral branches (`engine.py:27`).
+    - **Compression Parameter Metadata Injection:** Stored `step_seq` and `step_dim` in ChromaDB metadata during ingestion (`engine.py:468-469`). Injection now reads the per-document `step_seq` from metadata via `.get("step_seq", self.step_seq)`, preventing structure mismatch crashes when ingesting with different compression configurations (`engine.py:723`).
+    - **Dead Code Elimination:** Removed redundant `CPSPacket` double-initialization and three unreachable `return 0` statements in `ingest_high_fidelity` (`engine.py:231-236`, `486-489`).
+    - **Multi-Host Compliance (Invariant 4):** Replaced all hardcoded `http://localhost:8000` frontend URLs with `http://${window.location.hostname}:8000` across `Chat.jsx`, `Ingest.jsx`, and `App.jsx`, restoring dynamic backend resolution.
+    - **Delta: 0.1, Lambda: 0.1.****

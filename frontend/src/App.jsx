@@ -74,7 +74,7 @@ const App = () => {
             >
               {activeTab === 'chat' ? <Chat onSelectPdf={(pdf) => setSelectedPdf({
                 name: pdf.name,
-                url: `http://localhost:8000/pdfs/${pdf.name}`,
+                url: `http://${window.location.hostname}:8000/pdfs/${pdf.name}`,
                 page: pdf.page || 1
               })} /> : <Ingest />}
             </motion.div>

@@ -70,7 +70,8 @@ class QueryRequest(BaseModel):
 
 @app.get("/status")
 async def get_status():
-    return {"status": "ready", "model": "mistralai/Ministral-3-8B-Instruct-2512"}
+    eng = get_engine()
+    return {"status": "ready", "model": eng.model_id if eng else "initializing"}
 
 @app.post("/ingest")
 async def ingest_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):

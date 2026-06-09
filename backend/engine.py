@@ -24,7 +24,7 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.datamodel.base_models import InputFormat
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Mistral3ForConditionalGeneration, MistralCommonBackend
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import DynamicCache
 from typing import Optional
 import transformers.integrations.sdpa_attention as sdpa_module
@@ -127,7 +127,17 @@ class RAGEngine:
                 return original_sdpa_attention_forward(module, query, key, value, attention_mask=attention_mask, dropout_p=dropout_p, is_causal=is_causal, **kwargs)
             sdpa_module.sdpa_attention_forward = custom_sdpa_attention_forward
 
-            # 2. DynamicCache usable length patch
+            # 2. ALL_ATTENTION_FUNCTIONS patch (v6.6): Gemma 4 imports SDPA during module compilation, bypassing module-level patch
+            try:
+                import transformers.models.gemma4.modeling_gemma4 as gemma4_module
+                if hasattr(gemma4_module, 'ALL_ATTENTION_FUNCTIONS'):
+                    for attn_key in list(gemma4_module.ALL_ATTENTION_FUNCTIONS.keys()):
+                        gemma4_module.ALL_ATTENTION_FUNCTIONS[attn_key] = custom_sdpa_attention_forward
+                    print("--- [LLM] ALL_ATTENTION_FUNCTIONS monkey-patch appliqué ---")
+            except (ImportError, AttributeError) as e:
+                print(f"--- [LLM] ALL_ATTENTION_FUNCTIONS patch non disponible: {e} ---")
+
+            # 3. DynamicCache usable length patch
             def custom_get_usable_length(self, seq_len: int, layer_idx: Optional[int] = None) -> int:
                 if len(self.key_cache) == 0:
                     return 0
@@ -198,14 +208,16 @@ class RAGEngine:
             self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=processor, custom_layout=[256, 256, 256, 256, 512]*3)
             
         elif "Ministral-3-8B-Instruct-2512" in self.model_id:
+            from transformers import Mistral3ForConditionalGeneration
             self.model = Mistral3ForConditionalGeneration.from_pretrained(
                 self.model_id,
                 device_map="cuda",
                 trust_remote_code=True
             )
-            self.tokenizer = MistralCommonBackend.from_pretrained(self.model_id)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
             self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=self.tokenizer)
         else:
+            from transformers import Mistral3ForConditionalGeneration
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -218,7 +230,7 @@ class RAGEngine:
                 device_map="auto",
                 trust_remote_code=True
             )
-            self.tokenizer = MistralCommonBackend.from_pretrained(self.model_id)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
             self.hook = TransformersHook(self.model, "RAG-SECURE-STREAM", processor=self.tokenizer)
 
         if hasattr(self.tokenizer, 'pad_token_id') and self.tokenizer.pad_token_id is None:
@@ -227,13 +239,11 @@ class RAGEngine:
         print(f"--- [LLM] Modele et Tokenizer charges en {time.time() - start_time:.2f}s ---")
         print("--- [LLM] Tokenizer et Template prets ! ---")
         
-        # 3. Chromatix Hook & CPS
-        print("--- [CPS] Initialisation du protocole Pixel Standard (No-Thinking Mode)... ---")
-        self.cps = CPSPacket(master_key="CHROMATIX-NEURAL-RAG-2026")
+        # 3. Chromatix CPS
+        self.cps = CPSPacket(master_key="RAG-SECURE-STREAM", recovery_key="RAG-RECOVERY-TETHER")
         
         # 4. Vector DB
         self.vector_db = None
-        self.cps = CPSPacket(master_key="RAG-SECURE-STREAM", recovery_key="RAG-RECOVERY-TETHER")
         print("--- [DB] Initialisation de la base vectorielle... ---")
         self._init_db()
 
@@ -455,7 +465,9 @@ class RAGEngine:
                     "brain_state_len": len(data),
                     "brain_state_img": cgc_path,
                     "index": f"{processed_count}",
-                    "detected_language": page_lang
+                    "detected_language": page_lang,
+                    "step_seq": self.step_seq,
+                    "step_dim": 1
                 }
                 
                 # Streaming page-by-page db indexing
@@ -484,9 +496,6 @@ class RAGEngine:
             import traceback
             traceback.print_exc()
             return 0
-        return 0
-        
-        return 0
 
     def process_file(self, file_path):
         """
@@ -713,7 +722,8 @@ class RAGEngine:
                             f.seek(int(offset))
                             payload = f.read(int(length))
                             brain_stream = io.BytesIO(payload)
-                            _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv, step_seq=self.step_seq)
+                            cgc_step_seq = doc.metadata.get("step_seq", self.step_seq)
+                            _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv, step_seq=cgc_step_seq)
                         injected_paths.append(injection_key)
                     except Exception as e:
                         print(f"!!! [CPS_FAILURE] Erreur lors de l'injection unifiée : {e}")
@@ -736,15 +746,23 @@ class RAGEngine:
             print("--- [CPS] Bypassing injection: Fallback sur prefill standard (Mode Safe) ---", flush=True)
             pkv = None
 
+        # Inject conversation history (last 2 exchanges, 2000 tokens max each)
+        history_context = []
+        for msg in history[-4:]:
+            truncated = msg["content"][:2000] if len(msg["content"]) > 2000 else msg["content"]
+            history_context.append({"role": msg["role"], "content": truncated})
+
         # Build prompt messages dynamically depending on KV cache presence
         if pkv is not None:
             messages = [
                 {"role": "system", "content": system_prompt},
+                *history_context,
                 {"role": "user", "content": f"Question : {query}\nRéponds de manière concise et précise, en citant les numéros de page si nécessaire."}
             ]
         else:
             messages = [
                 {"role": "system", "content": system_prompt},
+                *history_context,
                 {"role": "user", "content": f"Contexte technique :\n{context_text}\n\nQuestion : {query}\nRéponds de manière concise et précise, en citant les numéros de page si nécessaire."}
             ]
 
