@@ -1,62 +1,74 @@
 # Chromatix RAG Engine 🧠⚡
 
-**Chromatix RAG Engine** is a high-performance, local-first Retrieval-Augmented Generation system. It is specifically optimized for scientific documents and features **Neural Context Teleportation** (Phase 3) via the **Chromatix Pixel Standard (CPS)**.
+**Chromatix RAG Engine** is a high-performance, local-first Retrieval-Augmented Generation system. It is specifically optimized for scientific documents and features **Neural Context Teleportation** via the **Chromatix Pixel Standard (CPS)**.
+
+This engine introduces two major scientific innovations in local RAG architectures: **Crystallization** (Neural caching storage) and **SEH (Stabilized Harmonic Equilibrium)** (Neural attractor decision router).
+
+---
+
+## 🚀 Core Innovations
+
+### 1. 💎 La Cristallisation (Unified Crystal Storage)
+Plutôt que d'envoyer du texte brut à l'attention du LLM à chaque requête, ce qui sature la VRAM et ralentit l'inférence :
+* **Page-by-Page Encoding** : Chaque page du document est pré-analysée et transformée en son état de mémoire attentionnel (KV-cache).
+* **Format Crystal (.cgc)** : Cet état est compressé en format géométrique 4 bits (NF4) et enregistré de façon séquentielle sous forme de cristal binaire (`.cgc`), réduisant l'empreinte mémoire d'un facteur **650x** (~21 Ko/page).
+* **Neural Context Teleportation** : Lors d'une requête, le cache d'attention est injecté (téléporté) directement dans le GPU, permettant au modèle d'assimiler instantanément le contexte technique sans avoir à relire le document.
+
+### 2. 🌊 Arbitrage Neuronal SEH (Stabilized Harmonic Equilibrium)
+Pour éviter la pollution du contexte par des pages similaires mais non pertinentes remontées par la recherche vectorielle :
+* **Winner-Take-All Attractor** : Les candidats de ChromaDB s'affrontent au sein d'un champ neuronal dynamique régi par l'équation SEH (oubli uniforme, bistabilité et inhibition globale).
+* **Filtrage Intelligent** : Les pages parasites sont activement inhibées (projections négatives), tandis que les pages sémantiquement stables et cohérentes avec la question émergent comme gagnantes et sont téléportées.
+* **Rollback natif** : Le système inclut un paramètre dynamique `use_seh = True/False` permettant un débrayage complet et un retour vers l'ancien système classique à tout moment.
+
+---
 
 ## 🚀 Key Features
 
-- **Instant Prefill (Phase 3)**: Bypasses traditional LLM prefill latency by injecting pre-calculated KV-cache (Brain States) directly into the model's memory.
-- **Scientific OCR (Docling)**: High-fidelity extraction of LaTeX formulas, tables, and complex structures from architectural and scientific PDFs.
-- **Mistral-Nemo Native**: Powered by `Mistral-Nemo-12B-Instruct-v1` loaded in 4-bit (NF4) for high-reasoning capabilities on consumer GPUs (RTX 4070 Ti+).
-- **Agentic Security**: Context is transported and stored as encrypted "Pixel-Blobs" via the CPS protocol, ensuring bit-perfect fidelity and intrinsic security.
-- **Zero-Cloud**: 100% local processing for maximum data privacy.
+- **Instant Prefill** : Plus aucun délai de lecture initiale du prompt grâce à l'injection directe de KV-cache.
+- **Scientific OCR (Docling)** : Extraction haute fidélité des formules LaTeX, tableaux et structures complexes à partir des PDFs scientifiques.
+- **Dynamic Multi-Doc Support** : Téléporte et accumule dynamiquement les états d'attention de plusieurs pages ou documents différents (jusqu'à `max_references`) dans la même session.
+- **Zero-Cloud** : Traitement 100% local préservant l'intégrité et la confidentialité absolue de vos documents scientifiques.
+
+---
 
 ## 🛠 Tech Stack
 
-- **Inference**: PyTorch / Transformers (with `bitsandbytes` 4-bit quantization).
-- **Protocol**: [Chromatix Pixel Standard (CPS)](https://github.com/lecyberbill/Chromatix-Pixel-Standard).
-- **Document Processing**: IBM Docling.
-- **Vector Database**: ChromaDB.
-- **Frontend**: Vite / React (Premium Compositor UI).
+- **Inference** : PyTorch / Transformers (bitsandbytes NF4 quantization, SDPA custom monkeypatches).
+- **LLM default** : `google/gemma-4-E2B-it` (NF4).
+- **Protocol** : [Chromatix Pixel Standard (CPS)](https://github.com/lecyberbill/Chromatix-Pixel-Standard).
+- **Document Processing** : IBM Docling.
+- **Vector Database** : ChromaDB.
+- **Frontend** : Vite / React (Premium Compositor UI).
+
+---
 
 ## 📦 Installation
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/lecyberbill/Chromatix-RAG-Engine.git
-   cd Chromatix-RAG-Engine
-   ```
-
-2. **Setup Virtual Environment**:
+1. **Setup Virtual Environment**:
    ```bash
    python -m venv venv
    .\venv\Scripts\activate
    pip install -r requirements.txt
    ```
 
-3. **Chromatix Link**:
-   Ensure the `chromatix` core library is located at `d:\image_to_text\chromatix` or update the path in `backend/engine.py`.
+2. **Chromatix Link**:
+   Assurez-vous que la librairie `chromatix` est présente à l'emplacement indiqué dans le backend (`d:\image_to_text\chromatix`).
+
+---
 
 ## 📖 Usage
 
 ### 1. Ingestion
-Run the bulk ingestion script to process your scientific PDFs and generate Brain States:
+Lancez le script d'ingestion pour numériser et cristalliser vos fichiers PDFs en états neuronaux `.cgc` :
 ```bash
 .\ingest.bat
 ```
 
-### 2. Start the Engine
-Launch the backend and frontend simultaneously:
+### 2. Démarrage du serveur et de l'interface
 ```bash
 .\start.bat
 ```
 
-## 🧠 Phase 3: How it works
-Unlike traditional RAG which sends raw text to the LLM, Chromatix RAG:
-1. **Encodes** the document into a high-dimensional neural state (KV-cache).
-2. **Stores** this state as a binary "Brain State" in the vector database.
-3. **Teleports** (Injects) this state directly into the model during a query.
-4. **Responds** instantly, as the model "inherits" the context without reading it.
-
 ---
 **Author:** lecyberbill  
-**Protocol:** Chromatix Pixel Standard v1.5
+**Protocol:** Chromatix Pixel Standard v1.5 / SEH V1.3 Integration

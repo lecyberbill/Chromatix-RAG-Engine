@@ -107,6 +107,8 @@ class RAGEngine:
         self.zstd_level = zstd_level
         self.db_path = "data/db"
         self.pdf_path = "data/pdfs"
+        self.use_seh = True
+        self.max_references = 3
         
         # Apply Gemma 4 patches dynamically if loading Gemma 4
         if "gemma-4" in self.model_id:
@@ -302,6 +304,82 @@ class RAGEngine:
         translated = translated.strip('"\'')
         print(f"[+] Requête alignée : '{translated}'", flush=True)
         return translated
+
+    def arbitrate_pages_with_seh(self, ranked_pages: list) -> list:
+        if not ranked_pages:
+            return []
+            
+        import backend.seh as seh
+        
+        # 1. Pré-filtrage : on élimine les scores nuls/négatifs et on limite aux top 5 pour éviter la sur-inhibition
+        competing_candidates = [item for item in ranked_pages if item[0] > 0]
+        competing_candidates = competing_candidates[:5]
+        
+        if not competing_candidates:
+            print("[SEH] Aucun candidat avec un score positif. Fallback direct.", flush=True)
+            return [ranked_pages[0][1]]
+            
+        print(f"--- [SEH] Arbitrage neuronal sur {len(competing_candidates)} pages candidates actives (sur {len(ranked_pages)}) ---", flush=True)
+        
+        n_candidates = len(competing_candidates)
+        config = seh.SehConfig(
+            n=60,
+            inhib=0.04,        # Inhibition globale adoucie pour permettre la coexistence de candidats proches
+            gain=0.35,         # Gain légèrement accru
+            beta=0.25,
+            coupling=0.30,
+            damping=0.10,
+            c_target=0.05,
+            alpha_pol=0.10,
+            cycles=500,
+            threshold=0.4,
+            noise_amp=0.10,
+            allow_negative=False,
+            max_winners=self.max_references
+        )
+        
+        patterns = seh.sinus_patterns(config.n, list(range(1, n_candidates + 1)))
+        
+        # Extraction et normalisation des coefficients
+        raw_scores = [score for score, _ in competing_candidates]
+        max_score = max(raw_scores) if raw_scores else 1.0
+        
+        if max_score > 0:
+            coeffs = [s / max_score for s in raw_scores]
+        else:
+            coeffs = [0.0] * n_candidates
+            
+        decision = seh.decide(coeffs, patterns, config)
+        winners = decision.get("winners", [])
+        projections = decision.get("projections", [])
+        
+        print(f"--- [SEH] Résultats de l'arbitrage (gagnants: {winners}, cycles: {decision.get('cycles_used')}) ---", flush=True)
+        
+        # Log pour les candidats actifs
+        for i, (score, page) in enumerate(competing_candidates):
+            proj_val = projections[i] if i < len(projections) else 0.0
+            status = "🏆 GAGNANT (TELEPORTÉ)" if i in winners else "❌ ÉLIMINÉ (INHIBÉ)"
+            doc_name = os.path.basename(page.metadata.get("source", "Doc"))
+            p_num = page.metadata.get("page", 1)
+            print(f"   * Active {i+1} : {doc_name} (p.{p_num}) | Score: {score:.1f} | Proj SEH: {proj_val:+.3f} -> {status}", flush=True)
+            
+        # Log pour les candidats exclus d'office
+        for i, (score, page) in enumerate(ranked_pages):
+            if (score, page) not in competing_candidates:
+                doc_name = os.path.basename(page.metadata.get("source", "Doc"))
+                p_num = page.metadata.get("page", 1)
+                print(f"   * Filtré {i+1} : {doc_name} (p.{p_num}) | Score: {score:.1f} | -> ❌ HORS-JEU (Score trop faible)", flush=True)
+            
+        selected_pages = []
+        for idx in winners:
+            if idx < len(competing_candidates):
+                selected_pages.append(competing_candidates[idx][1])
+                
+        if not selected_pages:
+            print("[SEH] Aucun vainqueur n'a émergé de la compétition SEH. Fallback sur la meilleure page.", flush=True)
+            selected_pages = [ranked_pages[0][1]]
+            
+        return selected_pages
 
     def rank_crystal_pages(self, pages: list, query: str, doc_lang: str) -> list:
         if not pages:
@@ -616,13 +694,17 @@ class RAGEngine:
         # Sort globally by score descending
         all_ranked_pages.sort(key=lambda x: x[0], reverse=True)
         
-        # Keep only the top-scoring pages (e.g. top 3 pages globally)
-        selected_top_docs = [page for score, page in all_ranked_pages if score > 0]
-        if not selected_top_docs:
-            selected_top_docs = [docs[0]]
+        # Arbitrage ou Rollback classique
+        if self.use_seh:
+            # Arbitrage neuronal dynamique via SEH (Winner-Take-All / Compétition d'inhibition)
+            selected_top_docs = self.arbitrate_pages_with_seh(all_ranked_pages)
         else:
-            # Limit to top 1 highest scoring page to avoid context/cache bloat and target precisely the correct page
-            selected_top_docs = selected_top_docs[:1]
+            # ROLLBACK : Sélection classique d'origine (mise à jour pour retourner jusqu'à max_references pages)
+            selected_top_docs = [page for score, page in all_ranked_pages if score > 0]
+            if not selected_top_docs:
+                selected_top_docs = [docs[0]]
+            else:
+                selected_top_docs = selected_top_docs[:self.max_references]
 
         # Enable/Disable Sliding Window Neighbors (Disabled to avoid context/cache bloat and respect user choice)
         ENABLE_SLIDING_WINDOW = False
