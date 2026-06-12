@@ -87,4 +87,24 @@ Analysed the [Dot-main](file:///d:/image_to_text/RAG/Dot-main) repository to ide
     - **Compression Parameter Metadata Injection:** Stored `step_seq` and `step_dim` in ChromaDB metadata during ingestion (`engine.py:468-469`). Injection now reads the per-document `step_seq` from metadata via `.get("step_seq", self.step_seq)`, preventing structure mismatch crashes when ingesting with different compression configurations (`engine.py:723`).
     - **Dead Code Elimination:** Removed redundant `CPSPacket` double-initialization and three unreachable `return 0` statements in `ingest_high_fidelity` (`engine.py:231-236`, `486-489`).
     - **Multi-Host Compliance (Invariant 4):** Replaced all hardcoded `http://localhost:8000` frontend URLs with `http://${window.location.hostname}:8000` across `Chat.jsx`, `Ingest.jsx`, and `App.jsx`, restoring dynamic backend resolution.
-    - **Delta: 0.1, Lambda: 0.1.****
+    - **Delta: 0.1, Lambda: 0.1.**
+
+- **2026-06-09 (v14.0 - SEH HARDENING & ORTHOGONAL BASIS):** Corrected three regressions in the SEH neural field router.
+    - **Walsh-Hadamard Orthogonal Basis:** Replaced `sinus_patterns` (sinusoidal basis with non-zero cross-talk on discrete n=60 grid) with `walsh_hadamard_patterns` using Sylvester construction. Patterns are strictly orthogonal binary (+1/-1) vectors normalized to unit norm, eliminating cross-inhibition between non-competing candidates (`backend/seh.py`).
+    - **Query-Derived RNG Seed:** Replaced fixed seed `0xABCDEF` with `seed_from_query(query)` which derives a deterministic per-query seed from Python's salted hash. The noise in `semer()` now varies by query while staying reproducible within the same session (`backend/seh.py`, `backend/engine.py:704`).
+    - **Configurable Candidate Pool:** Replaced hardcoded `[:5]` pre-filter limit with `self.max_seh_candidates = 5` parameter on `RAGEngine`. The field size `n` auto-scales to the next power of 2 when candidates exceed 60 (`backend/engine.py:111`).
+    - **Delta: 0.05, Lambda: 0.1.**
+
+- **2026-06-09 (v14.5 - SEH ARBITRATION & CRYSTAL INTEGRITY):** Retuned SEH dynamics and added crystal corruption detection.
+    - **SEH Dynamics Overhaul:** Adjusted field parameters (`gain=1.0`, `beta=0.5`, `c_target=0.001`, `damping=0.05`, `inhib=0.02`, `noise_amp=0.01`) so attractors at ±1.4 replace the previous trivial fixed point at zero. Projections now meaningfully differentiate candidates (`engine.py:330-344`).
+    - **Proportional Arbitration:** Replaced binary winner-take-all with proportional scoring: `final_score = LKPT × max(0.1, projection + 1.0)`. A page with projection +1.4 gets 2.4× boost; a page at -0.9 gets 0.1× survival floor. SEH now genuinely reranks instead of rubber-stamping LKPT (`engine.py:362-370`).
+    - **Crystal SHA-256 Checksum:** Computes `hashlib.sha256(payload).hexdigest()` during ingestion and stores it as `crc` in ChromaDB metadata. Before injection, recalculates and compares; mismatches are logged and skipped, preventing silent garbage from corrupted `.cgc` files (`engine.py:548,567`, `engine.py:827-832`).
+    - **Capture Retry Loop:** Wraps `extract_brain_state` + CGC write in a 2-attempt retry per page. Catches exceptions and empty crystals (< 64 bytes). Pages with empty text are skipped before the retry loop (`engine.py:536-561`).
+    - **Delta: 0.05, Lambda: 0.1.****
+
+- **2026-06-09 (v15.0 - SEH ARBITRATION & CRYSTAL INTEGRITY):** Retuned SEH dynamics and added crystal corruption detection.
+    - **SEH Dynamics Overhaul:** Adjusted field parameters (`gain=1.0`, `beta=0.5`, `c_target=0.001`, `damping=0.05`, `inhib=0.02`, `noise_amp=0.01`) so attractors at ±1.4 replace the previous trivial fixed point at zero. Projections now meaningfully differentiate candidates (`engine.py:330-344`).
+    - **Proportional Arbitration:** Replaced binary winner-take-all with proportional scoring: `final_score = LKPT × max(0.1, projection + 1.0)`. A page with projection +1.4 gets 2.4× boost; a page at -0.9 gets 0.1× survival floor. SEH now genuinely reranks instead of rubber-stamping LKPT (`engine.py:362-370`).
+    - **Crystal SHA-256 Checksum:** Computes `hashlib.sha256(payload).hexdigest()` during ingestion and stores it as `crc` in ChromaDB metadata. Before injection, recalculates and compares; mismatches are logged and skipped, preventing silent garbage from corrupted `.cgc` files (`engine.py:548,567`, `engine.py:827-832`).
+    - **Capture Retry Loop:** Wraps `extract_brain_state` + CGC write in a 2-attempt retry per page. Catches exceptions and empty crystals (< 64 bytes). Pages with empty text are skipped before the retry loop (`engine.py:536-561`).
+    - **Delta: 0.05, Lambda: 0.1.**

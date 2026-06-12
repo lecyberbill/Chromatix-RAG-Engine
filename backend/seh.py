@@ -101,12 +101,12 @@ class SehField:
             self.z[i] = val
         self.v = [0.0] * n
 
-def decide(coeffs: list, patterns: list, config: SehConfig) -> dict:
+def decide(coeffs: list, patterns: list, config: SehConfig, seed: int = 0xABCDEF) -> dict:
     nb = len(patterns)
     assert len(coeffs) == nb, f"coeffs.len() ({len(coeffs)}) != patterns.len() ({nb})"
 
     field = SehField(patterns, config)
-    rng = SehRng(0xABCDEF)
+    rng = SehRng(seed)
     field.semer(coeffs, rng)
 
     early_stop_threshold = 0.95
@@ -152,17 +152,43 @@ def decide(coeffs: list, patterns: list, config: SehConfig) -> dict:
         "early_stop": early_stop
     }
 
-def sinus_patterns(n: int, ks: list) -> list:
+def walsh_hadamard_patterns(n: int, ks: list) -> list:
+    """Generate strictly orthogonal Walsh-Hadamard binary patterns.
+
+    Uses Sylvester's construction for a Hadamard matrix of size H
+    (next power of 2 >= n). Each pattern is a row of the matrix
+    (+1/-1) normalized to unit norm over its n components.
+    Pairs of distinct rows have dot product ~ 0 (bound by sqrt(n/H)),
+    eliminating the cross-talk inherent to sinusoidal basis functions.
+    """
+    nb = len(ks)
+    H = 1
+    while H < n:
+        H <<= 1
+
+    # Sylvester's construction: rows of the Hadamard matrix
+    rows = [[1.0]]
+    while len(rows) < H:
+        rows = [r + r for r in rows] + [r + [-x for x in r] for r in rows]
+
     patterns = []
-    for k in ks:
-        m = [0.0] * n
-        s = 0.0
-        for i in range(n):
-            x = 2.0 * math.pi * float(k) * float(i) / float(n)
-            m[i] = math.sin(x)
-            s += m[i] * m[i]
-        nrm = math.sqrt(s)
-        for i in range(n):
-            m[i] /= nrm
+    for i in range(min(nb, len(rows))):
+        row = rows[ks[i] % len(rows)]
+        m = [row[j] for j in range(n)]
+        s = sum(v * v for v in m)
+        if s > 0:
+            nrm = math.sqrt(s)
+            m = [v / nrm for v in m]
         patterns.append(m)
     return patterns
+
+def seed_from_query(query: str) -> int:
+    """Derive a deterministic RNG seed from the query text.
+
+    Uses Python's built-in hash (salted, randomised at interpreter start)
+    mixed with a fixed offset.  The outcome is reproducible within the
+    same process (same query → same seed) but varies across sessions
+    and queries.
+    """
+    base = hash(query) & 0xFFFFFFFFFFFFFFFF
+    return ((base << 13) ^ (base >> 7) ^ 0xA5A5A5A5A5A5A5A5) & 0xFFFFFFFFFFFFFFFF

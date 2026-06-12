@@ -109,6 +109,7 @@ class RAGEngine:
         self.pdf_path = "data/pdfs"
         self.use_seh = True
         self.max_references = 3
+        self.max_seh_candidates = 5
         
         # Apply Gemma 4 patches dynamically if loading Gemma 4
         if "gemma-4" in self.model_id:
@@ -305,15 +306,15 @@ class RAGEngine:
         print(f"[+] Requête alignée : '{translated}'", flush=True)
         return translated
 
-    def arbitrate_pages_with_seh(self, ranked_pages: list) -> list:
+    def arbitrate_pages_with_seh(self, ranked_pages: list, query: str = "") -> list:
         if not ranked_pages:
             return []
             
         import backend.seh as seh
         
-        # 1. Pré-filtrage : on élimine les scores nuls/négatifs et on limite aux top 5 pour éviter la sur-inhibition
+        # 1. Pré-filtrage : on élimine les scores nuls/négatifs et on garde les top max_seh_candidates
         competing_candidates = [item for item in ranked_pages if item[0] > 0]
-        competing_candidates = competing_candidates[:5]
+        competing_candidates = competing_candidates[:self.max_seh_candidates]
         
         if not competing_candidates:
             print("[SEH] Aucun candidat avec un score positif. Fallback direct.", flush=True)
@@ -322,23 +323,29 @@ class RAGEngine:
         print(f"--- [SEH] Arbitrage neuronal sur {len(competing_candidates)} pages candidates actives (sur {len(ranked_pages)}) ---", flush=True)
         
         n_candidates = len(competing_candidates)
+        
+        # Determiner la taille du reseau en fonction de max_seh_candidates
+        field_n = max(60, 2 ** (n_candidates.bit_length()))
+        
         config = seh.SehConfig(
-            n=60,
-            inhib=0.04,        # Inhibition globale adoucie pour permettre la coexistence de candidats proches
-            gain=0.35,         # Gain légèrement accru
-            beta=0.25,
+            n=field_n,
+            inhib=0.02,        # Inhibition faible : laisse plusieurs attracteurs coexister
+            gain=1.0,          # Bistabilite forte : attracteurs stables a ±sqrt(gain/beta) ≈ ±1.4
+            beta=0.5,
             coupling=0.30,
-            damping=0.10,
-            c_target=0.05,
-            alpha_pol=0.10,
-            cycles=500,
-            threshold=0.4,
-            noise_amp=0.10,
+            damping=0.05,       # Amortissement reduit : convergence rapide sans sous-amortissement
+            c_target=0.001,     # Equalisation quasi-nulle : ne force pas les projections vers 0
+            alpha_pol=0.05,
+            cycles=200,
+            threshold=0.01,
+            noise_amp=0.01,
             allow_negative=False,
-            max_winners=self.max_references
+            max_winners=1
         )
         
-        patterns = seh.sinus_patterns(config.n, list(range(1, n_candidates + 1)))
+        # Patterns strictement orthogonaux (Walsh-Hadamard) + seed deterministe lie a la requete
+        patterns = seh.walsh_hadamard_patterns(config.n, list(range(1, n_candidates + 1)))
+        seed = seh.seed_from_query(query) if query else 0xA5A5A5A5A5A5A5A5
         
         # Extraction et normalisation des coefficients
         raw_scores = [score for score, _ in competing_candidates]
@@ -349,32 +356,46 @@ class RAGEngine:
         else:
             coeffs = [0.0] * n_candidates
             
-        decision = seh.decide(coeffs, patterns, config)
-        winners = decision.get("winners", [])
+        decision = seh.decide(coeffs, patterns, config, seed=seed)
         projections = decision.get("projections", [])
         
-        print(f"--- [SEH] Résultats de l'arbitrage (gagnants: {winners}, cycles: {decision.get('cycles_used')}) ---", flush=True)
+        # SEH comme arbitre : les projections SEH amplifient ou penalisent le score LKPT.
+        # final_score = LKPT * max(0.1, projection_SEH + 1.0)
+        #   projection +1.4 (attracteur fort)  → score × 2.4  (fort boost)
+        #   projection  0.0 (neutre)           → score × 1.0  (preserve)
+        #   projection -0.5 (inhibe partiel)   → score × 0.5  (penalise)
+        #   projection -1.0 (presque elimine)  → score × 0.1  (survie minimale)
+        reranked = []
+        for i, (score, page) in enumerate(competing_candidates):
+            proj = projections[i] if i < len(projections) else 0.0
+            boost = max(0.1, proj + 1.0)
+            final_score = score * boost
+            reranked.append((final_score, page, proj, boost))
+        
+        reranked.sort(key=lambda x: x[0], reverse=True)
+        
+        print(f"--- [SEH] Arbitrage termine (cycles: {decision.get('cycles_used')}, early_stop: {decision.get('early_stop')}) ---", flush=True)
         
         # Log pour les candidats actifs
         for i, (score, page) in enumerate(competing_candidates):
             proj_val = projections[i] if i < len(projections) else 0.0
-            status = "🏆 GAGNANT (TELEPORTÉ)" if i in winners else "❌ ÉLIMINÉ (INHIBÉ)"
+            final = reranked[i][0] if i < len(reranked) else 0.0
+            boost = reranked[i][3] if i < len(reranked) else 1.0
+            status = "🏆 GAGNANT (TELEPORTÉ)" if i == reranked[0][1] else "⬇️ DÉCLASSÉ"
             doc_name = os.path.basename(page.metadata.get("source", "Doc"))
             p_num = page.metadata.get("page", 1)
-            print(f"   * Active {i+1} : {doc_name} (p.{p_num}) | Score: {score:.1f} | Proj SEH: {proj_val:+.3f} -> {status}", flush=True)
+            print(f"   * Candidat {i+1} : {doc_name} (p.{p_num}) | LKPT: {score:.0f} | Proj SEH: {proj_val:+.3f} | Boost: {boost:.2f}x | Final: {final:.0f} -> {status}", flush=True)
             
         # Log pour les candidats exclus d'office
         for i, (score, page) in enumerate(ranked_pages):
             if (score, page) not in competing_candidates:
                 doc_name = os.path.basename(page.metadata.get("source", "Doc"))
                 p_num = page.metadata.get("page", 1)
-                print(f"   * Filtré {i+1} : {doc_name} (p.{p_num}) | Score: {score:.1f} | -> ❌ HORS-JEU (Score trop faible)", flush=True)
-            
-        selected_pages = []
-        for idx in winners:
-            if idx < len(competing_candidates):
-                selected_pages.append(competing_candidates[idx][1])
-                
+                print(f"   * Filtré {i+1} : {doc_name} (p.{p_num}) | Score: {score:.0f} | -> ❌ HORS-JEU (Score trop faible)", flush=True)
+        
+        # Une seule page gagnante pour eviter la corruption du cache attentionnel
+        selected_pages = [reranked[0][1]] if reranked else []
+        
         if not selected_pages:
             print("[SEH] Aucun vainqueur n'a émergé de la compétition SEH. Fallback sur la meilleure page.", flush=True)
             selected_pages = [ranked_pages[0][1]]
@@ -445,6 +466,7 @@ class RAGEngine:
         
         # Determine the unified crystal path for this document
         import re
+        import hashlib
         doc_filename = os.path.basename(file_path)
         doc_clean_name, _ = os.path.splitext(doc_filename)
         safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '', doc_clean_name.replace(' ', '_'))
@@ -509,25 +531,50 @@ class RAGEngine:
                 
                 print(f"--- [RAG] Page {current_page_num}/{total_pages} (Neural Scan) ---")
                 
-                # Capture Neurale Gemma 4 (GPU)
-                if progress_callback: progress_callback(current_page_num, total_pages, "embedding")
-                start_cap = time.time()
-                # Store brain state in 4-bit NF4 format with configurable step_seq and zstd level (Option D: CGC-x1 + NF4)
-                stream = self.hook.extract_brain_state(
-                    page_text, 
-                    epoch_id=2026, 
-                    geometric=True, 
-                    quantize=True, 
-                    step_dim=1, 
-                    step_seq=self.step_seq, 
-                    level=self.zstd_level
-                )
-                cap_duration = time.time() - start_cap
+                # Capture avec retry (max 2 tentatives) si le premier essai echoue
+                data = None
+                for attempt in range(2):
+                    if attempt > 0:
+                        print(f"--- [RAG] Retry capture page {current_page_num} (tentative {attempt+1}) ---", flush=True)
+                    
+                    # Capture Neurale Gemma 4 (GPU)
+                    if progress_callback: progress_callback(current_page_num, total_pages, "embedding")
+                    start_cap = time.time()
+                    try:
+                        stream = self.hook.extract_brain_state(
+                            page_text, 
+                            epoch_id=2026, 
+                            geometric=True, 
+                            quantize=True, 
+                            step_dim=1, 
+                            step_seq=self.step_seq, 
+                            level=self.zstd_level
+                        )
+                        cap_duration = time.time() - start_cap
+                        raw = stream.getvalue()
+                        if len(raw) > 64:
+                            data = raw
+                            break
+                        else:
+                            print(f"   [!] Crystal vide ({len(raw)} bytes), retry...", flush=True)
+                    except Exception as cap_err:
+                        print(f"   [!] Capture echouee: {cap_err}, retry...", flush=True)
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                
+                if data is None:
+                    print(f"!!! [INGEST] Abandon page {current_page_num} apres 2 tentatives.", flush=True)
+                    if progress_callback: progress_callback(current_page_num, total_pages)
+                    continue
                 
                 # Stockage Direct NATIVE (Unified Chromatix CGC format)
                 if progress_callback: progress_callback(current_page_num, total_pages, "storage")
                 
                 data = stream.getvalue()
+                
+                # Integrity verification : checksum SHA-256 du crystal avant stockage
+                data_hash = hashlib.sha256(data).hexdigest()
+                
                 with open(cgc_path, "ab") as f:
                     offset = f.tell()
                     # Write big-endian 4-byte length prefix
@@ -545,7 +592,8 @@ class RAGEngine:
                     "index": f"{processed_count}",
                     "detected_language": page_lang,
                     "step_seq": self.step_seq,
-                    "step_dim": 1
+                    "step_dim": 1,
+                    "crc": data_hash
                 }
                 
                 # Streaming page-by-page db indexing
@@ -697,7 +745,7 @@ class RAGEngine:
         # Arbitrage ou Rollback classique
         if self.use_seh:
             # Arbitrage neuronal dynamique via SEH (Winner-Take-All / Compétition d'inhibition)
-            selected_top_docs = self.arbitrate_pages_with_seh(all_ranked_pages)
+            selected_top_docs = self.arbitrate_pages_with_seh(all_ranked_pages, query=query)
         else:
             # ROLLBACK : Sélection classique d'origine (mise à jour pour retourner jusqu'à max_references pages)
             selected_top_docs = [page for score, page in all_ranked_pages if score > 0]
@@ -787,11 +835,13 @@ class RAGEngine:
         start_injection = time.time()
         pkv = None
         injected_paths = []
+        import hashlib
         
         for doc in selected_top_docs:
             cgc_file = doc.metadata.get("brain_state_file")
             offset = doc.metadata.get("brain_state_offset")
             length = doc.metadata.get("brain_state_len")
+            stored_hash = doc.metadata.get("crc", "")
             
             # Key to uniquely identify if we've already injected this specific page from this book
             injection_key = f"{cgc_file}:{offset}" if (cgc_file and offset is not None) else doc.metadata.get("brain_state_img", "")
@@ -803,9 +853,17 @@ class RAGEngine:
                         with open(cgc_file, "rb") as f:
                             f.seek(int(offset))
                             payload = f.read(int(length))
-                            brain_stream = io.BytesIO(payload)
-                            cgc_step_seq = doc.metadata.get("step_seq", self.step_seq)
-                            _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv, step_seq=cgc_step_seq)
+                            
+                        # Verifier l'integrite du crystal avant injection
+                        if stored_hash:
+                            actual_hash = hashlib.sha256(payload).hexdigest()
+                            if actual_hash != stored_hash:
+                                print(f"!!! [CPS_INTEGRITY] Echec checksum pour {os.path.basename(cgc_file)} page {doc.metadata.get('page')}. Injection ignorée.", flush=True)
+                                continue
+                        
+                        brain_stream = io.BytesIO(payload)
+                        cgc_step_seq = doc.metadata.get("step_seq", self.step_seq)
+                        _, pkv = self.hook.inject_brain_state(brain_stream, pkv=pkv, step_seq=cgc_step_seq)
                         injected_paths.append(injection_key)
                     except Exception as e:
                         print(f"!!! [CPS_FAILURE] Erreur lors de l'injection unifiée : {e}")
